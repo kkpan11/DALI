@@ -1,4 +1,4 @@
-# Copyright (c) 2017-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2017-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,8 +13,7 @@
 # limitations under the License.
 
 # pylint: disable=no-member
-from typing import Any, List, Tuple, Callable, Optional, Union, overload
-from collections import deque
+from typing import Any, List, Tuple, Callable, Optional, Union, TypeVar, overload
 from nvidia.dali import backend as b
 from nvidia.dali import types
 from nvidia.dali import internal
@@ -22,16 +21,19 @@ from nvidia.dali import tensors
 from nvidia.dali._multiproc.pool import WorkerPool
 from nvidia.dali import pickling as dali_pickle
 from nvidia.dali import _conditionals
+from nvidia.dali._utils import dali_trace as _dali_trace
 from nvidia.dali._utils.external_source_impl import SourceKind as _SourceKind
 from threading import local as tls
 from . import data_node as _data_node
 import atexit
+import copy
 import functools
 import inspect
+import pickle  # nosec B403
+import sys
+import traceback
 import warnings
 import weakref
-import ctypes
-import sys
 from .data_node import DataNode
 
 pipeline_tls = tls()
@@ -50,13 +52,17 @@ def _show_deprecation_warning(deprecated, in_favor_of):
         )
 
 
+def _show_warning(message):
+    warnings.warn(message, Warning, stacklevel=2)
+
+
 class Pipeline(object):
     """Pipeline class is the base of all DALI data pipelines. The pipeline
     encapsulates the data processing graph and the execution engine.
 
     Parameters
     ----------
-    `batch_size` : int, optional, default = -1
+    batch_size : int, optional, default = -1
         Maximum batch size of the pipeline. Negative values for this parameter
         are invalid - the default value may only be used with
         serialized pipeline (the value stored in serialized pipeline
@@ -66,81 +72,88 @@ class Pipeline(object):
 
         Please note, that DALI might perform memory preallocations according to this
         parameter. Setting it too high might result in out-of-memory failure.
-    `num_threads` : int, optional, default = -1
+    num_threads : int, optional, default = -1
         Number of CPU threads used by the pipeline.
         Negative values for this parameter are invalid - the default
         value may only be used with serialized pipeline (the value
         stored in serialized pipeline is used instead).
-    `device_id` : int, optional, default = -1
+    device_id : int, optional, default = -1
         Id of GPU used by the pipeline.
         A None value for this parameter means that DALI should not use GPU nor CUDA runtime.
         This limits the pipeline to only CPU operators but allows it to run on any CPU capable
         machine.
-    `seed` : int, optional, default = -1
+    seed : int, optional, default = -1
         Seed used for random number generation. Leaving the default value
         for this parameter results in random seed.
-    `exec_pipelined` : bool, optional, default = True
+    exec_pipelined : bool, optional, default = True
         Whether to execute the pipeline in a way that enables
         overlapping CPU and GPU computation, typically resulting
         in faster execution speed, but larger memory consumption.
-    `prefetch_queue_depth` : int or {"cpu_size": int, "gpu_size": int}, optional, default = 2
+    prefetch_queue_depth : int or {"cpu_size": int, "gpu_size": int}, optional, default = 2
         Depth of the executor pipeline. Deeper pipeline makes DALI
         more resistant to uneven execution time of each batch, but it
         also consumes more memory for internal buffers.
         Specifying a dict:
+
         ``{ "cpu_size": x, "gpu_size": y }``
+
         instead of an integer will cause the pipeline to use separated
         queues executor, with buffer queue size `x` for cpu stage
-        and `y` for mixed and gpu stages. It is not supported when both `exec_async`
-        and `exec_pipelined` are set to `False`.
-        Executor will buffer cpu and gpu stages separatelly,
+        and `y` for mixed and gpu stages.
+        Executor will buffer cpu and gpu stages separately,
         and will fill the buffer queues when the first :meth:`run`
         is issued.
-    `exec_async` : bool, optional, default = True
+        Separated execution requires that ``exec_async=True``, ``exec_pipelined=True`` and
+        ``exec_dynamic=False``.
+    exec_async : bool, optional, default = True
         Whether to execute the pipeline asynchronously.
         This makes :meth:`run` method
         run asynchronously with respect to the calling Python thread.
         In order to synchronize with the pipeline one needs to call
         :meth:`outputs` method.
-    `bytes_per_sample` : int, optional, default = 0
+    exec_dynamic : bool, optional, default = False
+        Whether to use the dynamic executor.
+        Dynamic executor allows to interleave CPU and GPU operators and to perform GPU to CPU
+        copies. It also uses dynamic memory allocation for pipeline outputs and inter-operator
+        buffers, which reduces memory consumption in complex pipelines.
+        When `exec_dynamic` is ``True``, `exec_async` and `exec_pipelined` must be left at
+        their default (``True``) values.
+    bytes_per_sample : int, optional, default = 0
         A hint for DALI for how much memory to use for its tensors.
-    `set_affinity` : bool, optional, default = False
+    set_affinity : bool, optional, default = False
         Whether to set CPU core affinity to the one closest to the
         GPU being used.
-    `max_streams` : int, optional, default = -1
-        Limit the number of CUDA streams used by the executor.
-        Value of -1 does not impose a limit.
-        This parameter is currently unused (and behavior of
-        unrestricted number of streams is assumed).
-    `default_cuda_stream_priority` : int, optional, default = 0
-        CUDA stream priority used by DALI. See `cudaStreamCreateWithPriority` in CUDA documentation
-    `enable_memory_stats`: bool, optional, default = False
+    max_streams : int, deprecated, default = None
+        Deprecated, this parameter has no effect.
+    default_cuda_stream_priority : int, optional, default = None
+        Deprecated, this parameter has no effect.
+    enable_memory_stats : bool, optional, default = False
         If DALI should print operator output buffer statistics.
         Useful for `bytes_per_sample_hint` operator parameter.
-    `enable_checkpointing`: bool, optional, default = False
-        If True, DALI will trace states of the operators. In that case, calling the ``checkpoint``
+        This flag has no effect when `exec_dynamic` is ``True``.
+    enable_checkpointing : bool, optional, default = False
+        If True, DALI will trace states of the operators. In that case, calling the `checkpoint`
         method returns serialized state of the pipeline. The same pipeline can be later rebuilt
         with the serialized state passed as the `checkpoint` parameter to resume running
         from the saved iteration.
 
         More details can be found in
         `this documentation section <advanced_topics_checkpointing.html>`_.
-
-
-    `checkpoint`: str, optional, default = None
-        Serialized checkpoint, received from ``checkpoint`` method.
+    checkpoint : str, optional, default = None
+        Serialized checkpoint, received from `checkpoint` method.
         When pipeline is built, its state is restored from the `checkpoint` and the pipeline
         resumes execution from the saved iteration.
 
         More details can be found in
         `this documentation section <advanced_topics_checkpointing.html>`_.
-
-    `py_num_workers`: int, optional, default = 1
-        The number of Python workers that will process ``ExternalSource`` callbacks.
-        The pool starts only if there is at least one ExternalSource with ``parallel`` set to True.
+    py_num_workers : int, optional, default = 1
+        The number of Python workers that will process parallel
+        :meth:`~nvidia.dali.fn.external_source` callbacks.
+        The pool starts only if there is at least one ExternalSource with
+        :paramref:`~nvidia.dali.fn.external_source.parallel` set to True.
         Setting it to 0 disables the pool and all ExternalSource operators fall back to non-parallel
-        mode even if ``parallel`` is set to True.
-    `py_start_method` : str, default = "fork"
+        mode even if :paramref:`~nvidia.dali.fn.external_source.parallel` is set to True.
+    py_start_method : str, default = "fork"
         Determines how Python workers are started. Supported methods:
 
           * ``"fork"`` - start by forking the process
@@ -149,10 +162,10 @@ class Pipeline(object):
         If ``spawn`` method is used, ExternalSource's callback must be picklable.
         In order to use ``fork``, there must be no CUDA contexts acquired at the moment of starting
         the workers. For this reason, if you need to build multiple pipelines that use Python
-        workers, you will need to call :meth:`start_py_workers` before calling :meth:`build` of any
-        of the pipelines. You can find more details and caveats of both methods in Python's
-        ``multiprocessing`` module documentation.
-    `py_callback_pickler` : module or tuple, default = None
+        workers, you will need to call :meth:`start_py_workers` before building or running
+        any of the pipelines (see :meth:`build` for details). You can find more details and caveats
+        of both methods in Python's ``multiprocessing`` module documentation.
+    py_callback_pickler : module or tuple, default = None
         If `py_start_method` is set to *spawn*, callback passed to parallel
         ExternalSource must be picklable.
         If run in Python3.8 or newer with `py_callback_pickler` set to None, DALI uses customized
@@ -162,7 +175,7 @@ class Pipeline(object):
         older version of Python you can provide external serialization package such as dill or
         cloudpickle that implements two methods: `dumps` and `loads` to make DALI use them to
         serialize external source callbacks. You can pass a module directly as
-        ``py_callback_pickler``::
+        `py_callback_pickler`::
 
             import dill
             @pipeline_def(py_callback_pickler=dill, ...)
@@ -185,16 +198,16 @@ class Pipeline(object):
         by decorating them with `@dali.pickling.pickle_by_value`. It may be especially useful when
         working with Jupyter notebook to work around the issue of worker process being unable to
         import the callback defined as a global function inside the notebook.
-    `output_dtype` : ``nvidia.dali.types.DALIDataType`` or list of those, default = None
+    output_dtype : ``nvidia.dali.types.DALIDataType`` or list of those, default = None
         With this argument, you may declare, what data type you expect in the given output. You
         shall pass a list of mod:`types.DALIDataType`, each element in the list corresponding to
         one output from the pipeline. Additionally, you can pass ``None`` as a wildcard.
         The outputs, after each iteration, will be validated against the types you passed to this
         argument. If any output does not match the provided type, RuntimeError will be raised.
 
-        If the ``output_dtype`` value is a single value (not a list), it will be broadcast to the
+        If the `output_dtype` value is a single value (not a list), it will be broadcast to the
         number of outputs from the pipeline.
-    `output_ndim` : int or list of ints, default = None
+    output_ndim : int or list of ints, default = None
         With this argument, you may declare, how many dimensions you expect in the given output.
         You shall pass a list of integers, each element in the list corresponding to one output
         from the pipeline.
@@ -203,7 +216,7 @@ class Pipeline(object):
         dimensionality of any output does not match the provided ``ndim``, RuntimeError will be
         raised.
 
-        If the ``output_ndim`` value is a single value (not a list), it will be broadcast to the
+        If the `output_ndim` value is a single value (not a list), it will be broadcast to the
         number of outputs from the pipeline."""
 
     def __init__(
@@ -217,8 +230,8 @@ class Pipeline(object):
         exec_async=True,
         bytes_per_sample=0,
         set_affinity=False,
-        max_streams=-1,
-        default_cuda_stream_priority=0,
+        max_streams=None,
+        default_cuda_stream_priority=None,
         *,
         enable_memory_stats=False,
         enable_checkpointing=False,
@@ -228,13 +241,23 @@ class Pipeline(object):
         py_callback_pickler=None,
         output_dtype=None,
         output_ndim=None,
+        exec_dynamic=False,
+        experimental_exec_dynamic=None,
     ):
+        if experimental_exec_dynamic is not None:
+            _show_deprecation_warning("experimental_exec_dynamic", "exec_dynamic")
+            exec_dynamic = experimental_exec_dynamic
+        if default_cuda_stream_priority is not None:
+            _show_warning("The `default_cuda_stream_priority` is deprecated and has no effect.")
+        if max_streams is not None:
+            _show_warning("The `max_streams` is deprecated and has no effect.")
         self._pipe = None
         self._sinks = []
         self._max_batch_size = batch_size
         self._num_threads = num_threads
         self._device_id = device_id
         self._seed = seed
+        self._next_op_id_counter = 0
         self._exec_pipelined = exec_pipelined
         # When initializing DALI, we do the following in order:
         # * Discover the ops specified in Python, group the ExternalSources (_build_graph())
@@ -249,19 +272,15 @@ class Pipeline(object):
         self._deserialized = False  # Marked True when deserializing
         self._first_iter = True
         self._last_iter = False
-        self._iter = 0
         self._epoch_idx = 0
         self._consumer_iter = 0
         self._consumer_epoch_idx = 0
         self._batches_to_consume = 0
-        self._cpu_batches_to_consume = 0
-        self._gpu_batches_to_consume = 0
         self._names_and_devices = None
         self._exec_async = exec_async
+        self._exec_dynamic = exec_dynamic
         self._bytes_per_sample = bytes_per_sample
         self._set_affinity = set_affinity
-        self._max_streams = max_streams
-        self._default_cuda_stream_priority = default_cuda_stream_priority
         self._py_num_workers = py_num_workers
         self._py_start_method = py_start_method
         if py_callback_pickler is not None and py_start_method == "fork":
@@ -285,8 +304,13 @@ class Pipeline(object):
         self._checkpoint = checkpoint
         self._prefetch_queue_depth = prefetch_queue_depth
         self._is_restored_from_checkpoint = False
+        self._iterator_data = None
         if type(prefetch_queue_depth) is dict:
             self._exec_separated = True
+            if not exec_async:
+                raise ValueError(
+                    "`exec_async` must not evaluate to `False` when using separated queues."
+                )
             self._cpu_queue_size = prefetch_queue_depth["cpu_size"]
             self._gpu_queue_size = prefetch_queue_depth["gpu_size"]
         elif type(prefetch_queue_depth) is int:
@@ -297,6 +321,8 @@ class Pipeline(object):
             raise TypeError("Expected prefetch_queue_depth to be either int or Dict[int, int]")
         self._conditionals_enabled = False
         self._condition_stack = None
+        # Tracking the stack frame where pipeline definition starts
+        self._definition_frame_start = 0
 
         # Assign and validate output_dtype
         if isinstance(output_dtype, (list, tuple)):
@@ -392,14 +418,19 @@ class Pipeline(object):
         return self._exec_async
 
     @property
+    def exec_dynamic(self):
+        """If true, the dynamic executor is used."""
+        return self._exec_dynamic
+
+    @property
     def set_affinity(self):
         """If True, worker threads are bound to CPU cores."""
         return self._set_affinity
 
     @property
     def max_streams(self):
-        """Reserved for future use."""
-        return self._max_streams
+        """Deprecated, unused; returns -1."""
+        return -1
 
     @property
     def prefetch_queue_depth(self):
@@ -408,8 +439,8 @@ class Pipeline(object):
 
     @property
     def default_cuda_stream_priority(self):
-        """Default priority of the CUDA streams used by this pipeline."""
-        return self._default_cuda_stream_priority
+        """Deprecated; always 0."""
+        return 0
 
     @property
     def enable_memory_stats(self):
@@ -447,12 +478,23 @@ class Pipeline(object):
         """If True, this pipeline was restored from checkpoint."""
         return self._is_restored_from_checkpoint
 
+    @property
+    def num_outputs(self) -> int:
+        """
+        Number of pipeline outputs.
+        """
+        self.build()
+        # output_dtype is a list with the dtype for each output, so we can simply take the length
+        return len(self._pipe.output_dtype())
+
     def output_dtype(self) -> list:
         """Data types expected at the outputs."""
+        self.build()
         return [elem if elem != types.NO_TYPE else None for elem in self._pipe.output_dtype()]
 
     def output_ndim(self) -> list:
         """Number of dimensions expected at the outputs."""
+        self.build()
         return [elem if elem != -1 else None for elem in self._pipe.output_ndim()]
 
     def epoch_size(self, name=None):
@@ -469,8 +511,7 @@ class Pipeline(object):
             The reader which should be used to obtain epoch size.
         """
 
-        if not self._built:
-            raise RuntimeError("Pipeline must be built first.")
+        self.build()
         if name is not None:
             return self._pipe.reader_meta(name)["epoch_size_padded"]
         meta = self._pipe.reader_meta()
@@ -494,9 +535,11 @@ class Pipeline(object):
             * ``max_reserved_memory_size`` - list of maximum memory sizes per tensor that is
               reserved for each of the operator outputs. Index in the list corresponds to
               the output index.
+
+        .. note::
+            Executor statistics are not available when using ``exec_dynamic=True``.
         """
-        if not self._built:
-            raise RuntimeError("Pipeline must be built first.")
+        self.build()
         return self._pipe.executor_statistics()
 
     def external_source_shm_statistics(self):
@@ -556,8 +599,7 @@ class Pipeline(object):
         name : str, optional, default = None
             The reader which should be used to obtain shards_number.
         """
-        if not self._built:
-            raise RuntimeError("Pipeline must be built first.")
+        self.build()
         if name is not None:
             return self._pipe.reader_meta(name)
         return self._pipe.reader_meta()
@@ -596,6 +638,43 @@ class Pipeline(object):
 
         prev = Pipeline.current()
         pipeline_tls.current_pipeline = pipeline
+        if _dali_trace.is_tracing_enabled():
+            stack_start = _dali_trace.get_stack_depth()
+
+            call_context = traceback.extract_stack(limit=3)
+            current_filename = call_context[-1].filename
+            # Cases:
+            # * in user code, we keep last user frame for reference:
+            #   user_function():
+            #       with pipe / Pipeline.push_current():
+            #           <pipeline_definition>
+            # * in DALI internals, we need to remove everything below _generate_graph:
+            #   _generate_graph():
+            #       with pipe: -> __enter__()
+            #           push_current()
+            #       pipeline_def()
+            #
+
+            if (
+                len(call_context) > 2
+                and call_context[-2].filename == current_filename
+                and call_context[-2].name == "__enter__"
+                and call_context[-3].filename == current_filename
+                and call_context[-3].name == "_generate_graph"
+            ):
+                # We point below the pipeline_def invocation
+                pipeline._definition_frame_start = stack_start - 2
+            else:
+                # Otherwise we are in user code
+                if (
+                    len(call_context) > 1
+                    and call_context[-2].filename == current_filename
+                    and call_context[-2].name == "__enter__"
+                ):
+                    pipeline._definition_frame_start = stack_start - 3
+                else:
+                    pipeline._definition_frame_start = stack_start - 2
+
         stack = getattr(pipeline_tls, "pipeline_stack", None)
         if stack is None:
             pipeline_tls.pipeline_stack = [prev]
@@ -606,6 +685,7 @@ class Pipeline(object):
     @staticmethod
     def pop_current():
         """Restores previous pipeline as current. Complementary to :meth:`push_current`."""
+        pipeline_tls.current_pipeline._definition_frame_start = 0
         pipeline_tls.current_pipeline = pipeline_tls.pipeline_stack.pop()
 
     def __enter__(self):
@@ -677,6 +757,50 @@ class Pipeline(object):
 
         return api_checker(self)
 
+    def _require_unique_names(self):
+        ops_by_name = {}
+        for op in self._ops:
+            ops = ops_by_name.get(op.name, None)
+            if ops is None:
+                ops = ops_by_name[op.name] = []
+            ops.append(op)
+        duplicate = {}
+        foreign = False
+        for name, ops in ops_by_name.items():
+            if len(ops) > 1:
+                duplicate[name] = ops
+                for op in ops:
+                    if op.pipeline is not self:
+                        foreign = True
+
+        if duplicate:
+            message = (
+                f"The pipeline is invalid because it contains operators with non-unique names:\n"
+                f"{duplicate}"
+            )
+            if foreign:
+                message += (
+                    "\nThe likely cause is that the pipeline contains a subgraph "
+                    "instantiated while a different pipeline was set as the current "
+                    "pipeline (e.g. inside another pipeline's graph definition function).\n"
+                )
+            raise RuntimeError(message)
+
+    def _require_no_foreign_ops(self, message):
+        foreign = []
+        for op in self._ops:
+            if op.pipeline is not self:
+                foreign.append(op)
+        if foreign:
+            raise RuntimeError(
+                f"{message} because it contains operator(s) "
+                f"that were defined outside the pipeline scope:\n"
+                f"{[o.name for o in foreign]}\n"
+                f"All operators should be defined while the pipeline is set as the current "
+                f"pipeline. This happens automatically when defining the pipeline in a "
+                f"function decorated with `@pipeline_def`."
+            )
+
     # Graph is constructed by backtracking from the output edges and the edges marked as sinks
     def _build_graph(self, define_graph=None):
         if define_graph is not None:
@@ -734,7 +858,12 @@ class Pipeline(object):
             _data_node._check(outputs[i])
 
         self._ops = _collect_ops(list(outputs) + self._sinks)
+        self._require_unique_names()
+        if self._enable_checkpointing:
+            self._require_no_foreign_ops("The pipeline does not support checkpointing")
+
         self._graph_outputs = outputs
+        self._num_outputs = len(self._graph_outputs)
         self._setup_input_callbacks()
         self._disable_pruned_external_source_instances()
         self._py_graph_built = True
@@ -775,10 +904,9 @@ class Pipeline(object):
             self._exec_pipelined,
             self._cpu_queue_size,
             self._exec_async,
+            self._exec_dynamic,
             self._bytes_per_sample,
             self._set_affinity,
-            self._max_streams,
-            self._default_cuda_stream_priority,
         )
         self._pipe.SetExecutionTypes(self._exec_pipelined, self._exec_separated, self._exec_async)
         self._pipe.SetQueueSizes(self._cpu_queue_size, self._gpu_queue_size)
@@ -886,8 +1014,8 @@ class Pipeline(object):
 
         If you are going to build more than one pipeline that starts Python workers by forking
         the process then you need to call :meth:`start_py_workers` method on all those pipelines
-        before calling :meth:`build` method of any pipeline, as build acquires CUDA context
-        for current process.
+        before calling any method that builds or runs the pipeline (see :meth:`build` for details),
+        as building acquires CUDA context for current process.
 
         The same applies to using any other functionality that would create CUDA context -
         for example, initializing a framework that uses CUDA or creating CUDA tensors with it.
@@ -907,19 +1035,39 @@ class Pipeline(object):
     def _restore_state_from_checkpoint(self):
         if self._checkpoint is not None:
             external_ctx_cpt = self._pipe.RestoreFromSerializedCheckpoint(self._checkpoint)
-            self._consumer_epoch_idx = self._epoch_idx = external_ctx_cpt.epoch_idx
-            self._consumer_iter = self._iter = external_ctx_cpt.iter
+            pipeline_data = pickle.loads(external_ctx_cpt.pipeline_data)  # nosec B301
+            self._consumer_epoch_idx = self._epoch_idx = pipeline_data["epoch_idx"]
+            self._consumer_iter = pipeline_data["iter"]
             if self._input_callbacks:
                 for group in self._input_callbacks:
-                    group.current_iter = external_ctx_cpt.iter
-                    group.current_sample = external_ctx_cpt.iter * self._max_batch_size
+                    group.current_iter = pipeline_data["iter"]
+                    group.current_sample = pipeline_data["iter"] * self._max_batch_size
+            self._iterator_data = external_ctx_cpt.iterator_data
             self._is_restored_from_checkpoint = True
 
-    def build(self):
-        """Build the pipeline.
+    def _next_op_id(self):
+        i = self._next_op_id_counter
+        self._next_op_id_counter += 1
+        return i
 
-        Pipeline needs to be built in order to run it standalone.
-        Framework-specific plugins handle this step automatically.
+    def build(self):
+        """Build the pipeline (optional step).
+
+        Instantiates the pipeline's backend objects and starts processing threads. If the pipeline
+        uses multi-processing ``external_source``, the worker processes are also started.
+        In most cases, there's no need to manually call build. When multi-processing is used,
+        it may be necessary to call :meth:`build` or :meth:`start_py_workers` before the main
+        process makes any interaction with the GPU. If needed, the :meth:`build` can used before
+        running the pipeline to separate the graph building and the processing steps.
+
+        Pipeline is automatically built when it is:
+
+            * run, either via the run APIs (:meth:`run`, :meth:`schedule_run`),
+              or the framework-specific plugins,
+            * the inputs are provided via :meth:`feed_input`
+            * the pipeline metadata is accessed (:meth:`epoch_size`, :meth:`reader_meta`)
+            * outputs are accessed - including :meth:`output_stream`
+            * the graph needs to be otherwise materialized - like :meth:`save_graph_to_dot_file`.
         """
         if self._built:
             return
@@ -938,24 +1086,23 @@ class Pipeline(object):
         self._restore_state_from_checkpoint()
         self._built = True
 
+    def input_feed_count(self, input_name):
+        self.build()
+        return self._pipe.InputFeedCount(input_name)
+
     def _feed_input(self, name, data, layout=None, cuda_stream=None, use_copy_kernel=False):
         from nvidia.dali.external_source import _prep_data_for_feed_input
 
         if cuda_stream is None:
             cuda_stream = types._get_default_stream_for_array(data)
-        if cuda_stream == -1:
-            cuda_stream = None
-        else:
-            cuda_stream = types._raw_cuda_stream(cuda_stream)
+        cuda_stream_ptr = types._raw_cuda_stream_ptr(cuda_stream)
 
         data = _prep_data_for_feed_input(data, self._max_batch_size, layout, self._device_id)
 
         if isinstance(data, list):
-            self._pipe.SetExternalTensorInput(
-                name, data, ctypes.c_void_p(cuda_stream), use_copy_kernel
-            )
+            self._pipe.SetExternalTensorInput(name, data, cuda_stream_ptr, use_copy_kernel)
         else:
-            self._pipe.SetExternalTLInput(name, data, ctypes.c_void_p(cuda_stream), use_copy_kernel)
+            self._pipe.SetExternalTLInput(name, data, cuda_stream_ptr, use_copy_kernel)
 
     def feed_input(self, data_node, data, layout=None, cuda_stream=None, use_copy_kernel=False):
         """Pass a multidimensional array or DLPack (or a list thereof) to an eligible operator.
@@ -964,7 +1111,7 @@ class Pipeline(object):
         (i.e. everything in ``fn.inputs`` module) and the :meth:`fn.external_source`.
 
         In the case of the GPU input, the data must be modified on the same stream as the one
-        used by ``feed_input``. See ``cuda_stream`` parameter for details.
+        used by ``feed_input``. See `cuda_stream` parameter for details.
 
         In order to avoid stalls, the data should be provided ahead of time `prefetch_queue_depth`
         times.
@@ -985,15 +1132,15 @@ class Pipeline(object):
               * objects implementing ``__cuda_array_interface__``
               * DALI ``TensorList`` or list of DALI ``Tensor`` objects
 
-            The data to be used as the output of the operator referred to by ``data_node``.
+            The data to be used as the output of the operator referred to by `data_node`.
 
         layout : string or ``None``
             The description of the data layout (or empty string, if not specified).
             It should be a string of the length that matches the dimensionality of the data, batch
             dimension excluded. For a batch of channel-first images, this should be ``"CHW"``, for
             channel-last video it's ``"FHWC"`` and so on.
-            If ``data`` is a DALI ``TensorList`` or a list of DALI ``Tensor`` objects and ``layout``
-            is ``None``, the layout is taken from ``data``.
+            If `data` is a DALI ``TensorList`` or a list of DALI ``Tensor`` objects and `layout`
+            is ``None``, the layout is taken from `data`.
             The layout of the data must be the same in each iteration.
 
         cuda_stream : optional, ``cudaStream_t`` or an object convertible to ``cudaStream_t``,
@@ -1018,8 +1165,7 @@ class Pipeline(object):
             If set to True, DALI will use a CUDA kernel to feed the data (only applicable
             when copying data to/from GPU memory) instead of ``cudaMemcpyAsync`` (default).
         """
-        if not self._built:
-            raise RuntimeError("Pipeline must be built first.")
+        self.build()
         if isinstance(data_node, str):
             name = data_node
         else:
@@ -1047,42 +1193,41 @@ class Pipeline(object):
 
         self._feed_input(name, data, layout, cuda_stream, use_copy_kernel)
 
-    def _run_cpu(self):
-        """Run CPU portion of the pipeline."""
-        if not self._built:
-            raise RuntimeError("Pipeline must be built first.")
-        if not self._last_iter:
-            self._pipe.RunCPU()
-            self._cpu_batches_to_consume += 1
+    def _require_exec_dynamic(self, error_message_prefix):
+        if not self._exec_dynamic:
+            raise ValueError(
+                error_message_prefix + " dynamic execution, enabled by passing "
+                "`exec_dynamic=True` to the Pipeline's constructor."
+            )
 
-    def _run_gpu(self):
-        """Run GPU portion of the pipeline."""
-        if not self._built:
-            raise RuntimeError("Pipeline must be built first.")
-        if self._cpu_batches_to_consume > 0:
-            self._pipe.RunGPU()
-            self._cpu_batches_to_consume -= 1
-            self._gpu_batches_to_consume += 1
-
-    def outputs(self):
+    def outputs(self, cuda_stream=None):
         """Returns the outputs of the pipeline and releases previous buffer.
 
         If the pipeline is executed asynchronously, this function blocks
         until the results become available. It rises StopIteration if data set
         reached its end - usually when iter_setup cannot produce any more data.
 
-        :return:
+        Parameters
+        ----------
+        cuda_stream : optional, ``cudaStream_t`` or an object convertible to ``cudaStream_t``,
+            e.g. ``cupy.cuda.Stream``, ``torch.cuda.Stream``
+            The stream to which the returned `TensorLists` are bound.
+            Defaults to None, which means that the outputs are synchronized with the host.
+            Works only with pipelines constructed with ``exec_dynamic=True``.
+
+        Returns
+        -------
             A list of `TensorList` objects for respective pipeline outputs
         """
+        if cuda_stream is not None:
+            self._require_exec_dynamic("Asynchronous outputs require")
+
         with self._check_api_type_scope(types.PipelineAPIType.SCHEDULED):
             self._consumer_iter += 1
-            if self._batches_to_consume == 0 or self._gpu_batches_to_consume == 0:
-                self._consumer_iter = 0
-                self._consumer_epoch_idx += 1
+            if self._batches_to_consume == 0:
                 raise StopIteration
             self._batches_to_consume -= 1
-            self._gpu_batches_to_consume -= 1
-            return self._outputs()
+            return self._outputs(cuda_stream)
 
     def schedule_run(self):
         """Run the pipeline without returning the resulting buffers.
@@ -1095,11 +1240,17 @@ class Pipeline(object):
         Needs to be used together with :meth:`release_outputs`
         and :meth:`share_outputs`.
         Should not be mixed with :meth:`run` in the same pipeline"""
+        self.build()
         with self._check_api_type_scope(types.PipelineAPIType.SCHEDULED):
             if self._first_iter and self._exec_pipelined:
                 self._prefetch()
             else:
                 self._run_once()
+
+    def output_stream(self):
+        """Returns the internal CUDA stream on which the outputs are produced."""
+        self.build()
+        return self._pipe.GetOutputStream()
 
     # for the backward compatibility
     def _run(self):
@@ -1107,7 +1258,7 @@ class Pipeline(object):
         _show_deprecation_warning("_run", "schedule_run")
         self.schedule_run()
 
-    def share_outputs(self):
+    def share_outputs(self, cuda_stream=None):
         """Returns the outputs of the pipeline.
 
         Main difference to :meth:`outputs`
@@ -1121,18 +1272,29 @@ class Pipeline(object):
         and :meth:`schedule_run`
         Should not be mixed with :meth:`run` in the same pipeline.
 
-        :return:
-            A list of `TensorList` objects for respective pipeline outputs
+        Parameters
+        ----------
+        cuda_stream : optional, ``cudaStream_t`` or an object convertible to ``cudaStream_t``,
+            e.g. ``cupy.cuda.Stream``, ``torch.cuda.Stream``
+            The stream to which the returned `TensorLists` are bound.
+            Defaults to None, which means that the outputs are synchronized with the host.
+            Works only with pipelines constructed with ``exec_dynamic=True``.
+
+        Returns
+        -------
+            A list of ``TensorList`` objects for respective pipeline outputs.
+            Unless using the dynamic executor, the returned buffers are valid only until
+            :meth:`release_outputs` is called.
         """
+        if cuda_stream is not None:
+            self._require_exec_dynamic("Asynchronous outputs require")
+
         with self._check_api_type_scope(types.PipelineAPIType.SCHEDULED):
             self._consumer_iter += 1
-            if self._batches_to_consume == 0 or self._gpu_batches_to_consume == 0:
-                self._consumer_iter = 0
-                self._consumer_epoch_idx += 1
+            if self._batches_to_consume == 0:
                 raise StopIteration
             self._batches_to_consume -= 1
-            self._gpu_batches_to_consume -= 1
-            return self._pipe.ShareOutputs()
+            return self._pipe.ShareOutputs(types._raw_cuda_stream_ptr(cuda_stream))
 
     # for the backward compatibility
     def _share_outputs(self):
@@ -1150,11 +1312,15 @@ class Pipeline(object):
         results have been consumed.
         Needs to be used together with :meth:`schedule_run`
         and :meth:`share_outputs`
-        Should not be mixed with :meth:`run` in the same pipeline"""
+        Should not be mixed with :meth:`run` in the same pipeline.
+
+        .. note::
+            When using dynamic executor (``exec_dynamic=True``), the buffers are not invalidated.
+        """
         with self._check_api_type_scope(types.PipelineAPIType.SCHEDULED):
-            if not self._built:
-                raise RuntimeError("Pipeline must be built first.")
-            return self._pipe.ReleaseOutputs()
+            self.build()
+            ret = self._pipe.ReleaseOutputs()
+            return ret
 
     # for the backward compatibility
     def _release_outputs(self):
@@ -1162,14 +1328,13 @@ class Pipeline(object):
         _show_deprecation_warning("_release_outputs", "release_outputs")
         self.release_outputs()
 
-    def _outputs(self):
+    def _outputs(self, cuda_stream=None):
         """Release buffers previously returned and returns  the calls.
 
         Calling this function is equivalent to calling release_outputs
         then calling share_outputs"""
-        if not self._built:
-            raise RuntimeError("Pipeline must be built first.")
-        return self._pipe.Outputs()
+        self.build()
+        return self._pipe.Outputs(types._raw_cuda_stream_ptr(cuda_stream))
 
     def _are_pipeline_inputs_possible(self):
         """
@@ -1182,10 +1347,10 @@ class Pipeline(object):
         return self.prefetch_queue_depth <= 1
 
     def run(
-        self, **pipeline_inputs
+        self, cuda_stream=None, /, **pipeline_inputs
     ) -> Tuple[Union[tensors.TensorListCPU, tensors.TensorListGPU], ...]:
         """
-        Run the pipeline and return the result.
+        Run the pipeline and return the result on the specified CUDA stream.
 
         If the pipeline was created with `exec_pipelined` option set to `True`,
         this function will also start prefetching the next iteration for
@@ -1196,6 +1361,11 @@ class Pipeline(object):
 
         Parameters
         ----------
+        cuda_stream : optional, ``cudaStream_t`` or an object convertible to ``cudaStream_t``,
+            If provided, the outputs are returned on this stream. If skipped, the results
+            are host-synchronous.
+            Note that with prefetch_queue_depth>1 it's possible to get host-synchronous output
+            without waiting for the results of the most recent iteration.
         pipeline_inputs :
             Optional argument that can be used to provide inputs to DALI.
             When DALI has any input operators defined (e.g. fn.external_source), you can provide the
@@ -1211,7 +1381,6 @@ class Pipeline(object):
             :meth:`run()` function::
 
                 p = my_pipe(prefetch_queue_depth=1, ...)
-                p.build()
                 p.run(my_inp=np.random((2,3,2)))
 
             Such keyword argument specified in the :meth:`run()` function has to have a
@@ -1242,31 +1411,81 @@ class Pipeline(object):
                 (e.g. `feed_input` function or `source` argument in the `fn.external_source`
                 operator.)"""
             )
+        self.build()
         for inp_name, inp_value in pipeline_inputs.items():
             self.feed_input(inp_name, inp_value)
         with self._check_api_type_scope(types.PipelineAPIType.BASIC):
             self.schedule_run()
-            return self.outputs()
+            return self.outputs(cuda_stream)
 
     def _prefetch(self):
         """Executes pipeline to fill executor's pipeline."""
-        if not self._built:
-            raise RuntimeError("Pipeline must be built first.")
+        self.build()
         if not self._pipe:
             raise RuntimeError("The pipeline was destroyed.")
         self._schedule_py_workers()
-        if self._exec_separated:
-            self._fill_separated_queues()
-        else:
-            for _ in range(self._prefetch_queue_depth):
-                self._run_once()
+
+        # We probably need some benchmarking before we remove this code path
+        if not self._exec_separated:
+            self._legacy_interleaved_prefetch()
+            return
+
+        # The new way: try to run the inputs and then feed them, finally call _pipe.Prefetch()
+        # If this fails, we just run `_pipe.Run()` a bunch of times. This will likely blow up for
+        # separated queues, which are not properly supported anyway.
+        iters_fed = 0
         self._first_iter = False
+        iters_fed, success = self._prefetch_inputs()
+        if success:
+            self._pipe.Prefetch()
+        else:
+            self._last_iter = True
+            for _ in range(iters_fed):
+                self._pipe.Run()
+
+    # This is the old way of prefetching - the feeding and running steps are interleaved.
+    # Running all callbacks at once, then feeding, then running - may affect the performance
+    # of the 1st iteration.
+    def _legacy_interleaved_prefetch(self):
+        for _ in range(self._cpu_queue_size):
+            try:
+                self._first_iter = False
+                self._iter_setup()
+                self._batches_to_consume += 1
+                if not self._exec_async and self._prefetch_queue_depth == 1:
+                    self.release_outputs()
+                self._pipe.Run()
+            except StopIteration:
+                self._last_iter = True
+                break
+
+    def _prefetch_inputs(self):
+        prefetched, success = self._run_input_callbacks(True)
+        self._batches_to_consume += prefetched
+
+        if success:
+            if self._exec_separated:
+                prefetch_count = self._cpu_queue_size + self._gpu_queue_size
+            else:
+                prefetch_count = self._cpu_queue_size
+
+            for i in range(prefetched, prefetch_count):
+                try:
+                    self.iter_setup()
+                    prefetched = i + 1
+                    self._batches_to_consume += 1
+                except StopIteration:
+                    success = False
+                    break
+
+        return prefetched, success
 
     def _run_once(self):
         """Start running the whole pipeline once without waiting for its results.
 
         If the pipeline was created with `exec_async` option set to `True`,
         this function will return without waiting for the execution to end."""
+        self.build()
         try:
             if not self._last_iter:
                 self._iter_setup()
@@ -1274,23 +1493,8 @@ class Pipeline(object):
             # Special case to prevent a deadlock if user didn't release the only buffer
             if not self._exec_async and self._prefetch_queue_depth == 1:
                 self.release_outputs()
-            self._run_cpu()
-            self._run_gpu()
-        except StopIteration:
-            self._last_iter = True
-
-    def _run_up_to(self, stage_name):
-        """Call the `_run_X` up to `stage_name` (inclusive)."""
-        try:
             if not self._last_iter:
-                self._iter_setup()
-                self._batches_to_consume += 1
-                self._run_cpu()
-                if stage_name == "cpu":
-                    return
-                self._run_gpu()
-                if stage_name == "gpu":
-                    return
+                self._pipe.Run()
         except StopIteration:
             self._last_iter = True
 
@@ -1300,19 +1504,6 @@ class Pipeline(object):
         for i, group in enumerate(self._parallel_input_callbacks):
             group.prefetch(self._py_pool, i, self._max_batch_size, self._epoch_idx)
 
-    def _fill_separated_queues(self):
-        """When using separated execution fill each of the prefetch queues"""
-        if not self._built:
-            raise RuntimeError("Pipeline must be built first.")
-        if not self._first_iter:
-            raise RuntimeError("Queues can be filled only on first iteration.")
-        if not self._exec_separated:
-            raise RuntimeError("This function should be only used with separated execution.")
-        for i in range(self._gpu_queue_size):
-            self._run_up_to("gpu")
-        for i in range(self._cpu_queue_size):
-            self._run_up_to("cpu")
-
     def reset(self):
         """Resets pipeline iterator
 
@@ -1321,8 +1512,10 @@ class Pipeline(object):
         if self._last_iter:
             self._first_iter = True
             self._last_iter = False
-            self._iter = 0
             self._epoch_idx += 1
+            if self._consumer_iter > 0:
+                self._consumer_epoch_idx += 1
+                self._consumer_iter = 0
             if self._input_callbacks:
                 for group in self._input_callbacks:
                     group.reset_indices()
@@ -1385,7 +1578,7 @@ class Pipeline(object):
         the pipeline. Refer to Pipeline constructor for full list of arguments. By default,
         the pipeline will be instantiated with the arguments from serialized pipeline.
 
-        Note, that ``serialized_pipeline`` and ``filename`` parameters are mutually exclusive
+        Note, that `serialized_pipeline` and `filename` parameters are mutually exclusive
 
         Parameters
         ----------
@@ -1418,10 +1611,9 @@ class Pipeline(object):
             kw.get("exec_pipelined", True),
             kw.get("prefetch_queue_depth", 2),
             kw.get("exec_async", True),
+            kw.get("exec_dynamic", False),
             kw.get("bytes_per_sample", 0),
             kw.get("set_affinity", False),
-            kw.get("max_streams", -1),
-            kw.get("default_cuda_stream_priority", 0),
         )
         if pipeline.device_id != types.CPU_ONLY_DEVICE_ID:
             b.check_cuda_runtime()
@@ -1444,8 +1636,6 @@ class Pipeline(object):
         pipeline._exec_async = kw.get("exec_async", True)
         pipeline._bytes_per_sample = kw.get("bytes_per_sample", 0)
         pipeline._set_affinity = kw.get("set_affinity", False)
-        pipeline._max_streams = kw.get("max_streams", -1)
-        pipeline._default_cuda_stream_priority = kw.get("default_cuda_stream_priority", 0)
 
         return pipeline
 
@@ -1465,10 +1655,9 @@ class Pipeline(object):
             self._exec_pipelined,
             self._prefetch_queue_depth,
             self._exec_async,
+            self._exec_dynamic,
             self._bytes_per_sample,
             self._set_affinity,
-            self._max_streams,
-            self._default_cuda_stream_priority,
         )
         self._pipe.SetExecutionTypes(self._exec_pipelined, self._exec_separated, self._exec_async)
         self._pipe.SetQueueSizes(self._cpu_queue_size, self._gpu_queue_size)
@@ -1481,7 +1670,7 @@ class Pipeline(object):
         self._deserialized = True
 
     def save_graph_to_dot_file(
-        self, filename, show_tensors=False, show_ids=False, use_colors=False
+        self, filename, *, show_tensors=False, show_ids=None, use_colors=False
     ):
         """Saves the pipeline graph to a file.
 
@@ -1491,14 +1680,35 @@ class Pipeline(object):
                    Name of the file to which the graph is written.
         show_tensors : bool
                    Show the Tensor nodes in the graph (by default only Operator nodes are shown)
-        show_ids : bool
-                   Add the node id to the graph representation
+        show_ids : bool, deprecated
+                   This flag is obsolete and has no effect
         use_colors : bool
                    Whether use color to distinguish stages
         """
-        if not self._built:
-            raise RuntimeError("Pipeline must be built first.")
-        self._pipe.SaveGraphToDotFile(filename, show_tensors, show_ids, use_colors)
+        self.build()
+        if show_ids is not None:
+            with warnings.catch_warnings():
+                warnings.simplefilter("default")
+                msg = (
+                    'The argument "show_ids" is deprecated because it no longer has any effect.\n'
+                    "It will be removed from future releases."
+                )
+                warnings.warn(msg, DeprecationWarning, stacklevel=2)
+
+        self._pipe.SaveGraphToDotFile(filename, show_tensors, use_colors)
+
+    def _get_checkpoint(self, iterator_data=""):
+        """
+        Returns the pipeline's state as a serialized Protobuf string.
+        Also, allows to pass additional data to be saved in the checkpoint.
+        """
+
+        external_ctx_cpt = b.ExternalContextCheckpoint()
+        external_ctx_cpt.pipeline_data = pickle.dumps(
+            {"iter": self._consumer_iter, "epoch_idx": self._epoch_idx}
+        )
+        external_ctx_cpt.iterator_data = iterator_data
+        return self._pipe.SerializedCheckpoint(external_ctx_cpt)
 
     def checkpoint(self, filename=None):
         """Returns the pipeline's state as a serialized Protobuf string.
@@ -1517,14 +1727,12 @@ class Pipeline(object):
         filename : str
                 The file that the serialized pipeline will be written to.
         """
-        external_ctx_cpt = b.ExternalContextCheckpoint()
-        external_ctx_cpt.epoch_idx = self._consumer_epoch_idx
-        external_ctx_cpt.iter = self._consumer_iter
-        ret = self._pipe.SerializedCheckpoint(external_ctx_cpt)
+        self.build()
+        cpt = self._get_checkpoint()
         if filename is not None:
             with open(filename, "wb") as checkpoint_file:
-                checkpoint_file.write(ret)
-        return ret
+                checkpoint_file.write(cpt)
+        return cpt
 
     def set_outputs(self, *output_data_nodes):
         """Set the outputs of the pipeline.
@@ -1533,7 +1741,7 @@ class Pipeline(object):
 
         Args
         ----
-        `*output_data_nodes` : unpacked list of :class:`DataNode` objects
+        *output_data_nodes : unpacked list of :class:`DataNode` objects
             The outputs of the pipeline
         """
         self._graph_out = output_data_nodes
@@ -1545,43 +1753,74 @@ class Pipeline(object):
         It returns a list of outputs created by calling DALI Operators."""
         raise NotImplementedError
 
-    def _run_input_callbacks(self):
-        if self._input_callbacks is None:
-            return
-
-        batches = []  # data from external source callbacks is gathered here
-        stop_iter = False
-        for i, group in enumerate(self._parallel_input_callbacks):
-            try:
-                batches.append(
-                    group.schedule_and_receive(
-                        self, self._py_pool, i, self._max_batch_size, self._epoch_idx
-                    )
-                )
-            except StopIteration:
-                stop_iter = True
-        for group in self._seq_input_callbacks:
-            try:
-                batches.append(group.get_batch(self, self._max_batch_size, self._epoch_idx))
-            except StopIteration:
-                stop_iter = True
-        if stop_iter:
-            raise StopIteration()
-
-        # we only fill external source queues when we know that all callbacks succeeded
-        for batch in batches:
-            batch.feed()
-
     def _iter_setup(self):
-        self._run_input_callbacks()
-        self.iter_setup()
-        self._iter += 1
+        self.build()
+        iters, success = self._run_input_callbacks()
+        if not success:
+            raise StopIteration
+        if iters == 0:
+            self.iter_setup()
+
+    def _run_input_callbacks(self, is_prefetch=False):
+        if self._input_callbacks is None:
+            return 0, True
+
+        done = False
+        stop_iter = False
+        iter = 0
+        while not done and not stop_iter:
+            done = True
+            batches = []  # data from external source callbacks is gathered here
+            for i, group in enumerate(self._parallel_input_callbacks):
+                try:
+                    count = group.feed_count(self) if is_prefetch else 1
+                    if iter < count:
+                        batches.append(
+                            group.schedule_and_receive(
+                                self, self._py_pool, i, self._max_batch_size, self._epoch_idx
+                            )
+                        )
+                        if iter + 1 < count:
+                            done = False
+                except StopIteration:
+                    stop_iter = True
+            for group in self._seq_input_callbacks:
+                try:
+                    count = group.feed_count(self) if is_prefetch else 1
+                    if iter < count:
+                        batches.append(group.get_batch(self, self._max_batch_size, self._epoch_idx))
+                        if iter + 1 < count:
+                            done = False
+                except StopIteration:
+                    stop_iter = True
+
+            if stop_iter:
+                return iter, False
+
+            try:
+                self.iter_setup()
+            except StopIteration:
+                return iter, False
+
+            # we only fill external source queues when we know that all callbacks succeeded
+            for batch in batches:
+                batch.feed()
+
+            iter += 1
+        return iter, True
 
     def iter_setup(self):
-        """This function can be overriden by user-defined
+        """A deprecated method of providing the pipeline with external inputs.
+
+        This function can be overridden by a user-defined
         pipeline to perform any needed setup for each iteration.
         For example, one can use this function to feed the input
-        data from NumPy arrays."""
+        data from NumPy arrays.
+
+        This method is deprecated and its use is discouraged. Newer execution models may be
+        incompatible with this method of providing data to the pipeline. Use `source` argument
+        in ``external_source`` instead, where possible.
+        """
         pass
 
     def _generate_build_args(self):
@@ -1607,6 +1846,33 @@ class Pipeline(object):
             (name, dev, types.NO_TYPE if dtype is None else dtype, -1 if ndim is None else ndim)
             for (name, dev), dtype, ndim in zip(self._names_and_devices, dtypes, ndims)
         ]
+
+    def _stub(self):
+        """Produce a stub by shallow-copying the pipeline, removing the backend and forbidding
+        operations that require the backend.
+
+        Stub pipelines are necessary in contexts where passing the actual pipeline would cause
+        circular reference - notably, PythonFunction operator.
+        """
+        stub = copy.copy(self)
+        stub._pipe = None
+
+        def short_circuit(self, *args, **kwargs):
+            raise RuntimeError("This method is forbidden in current context")
+
+        stub.start_py_workers = short_circuit
+        stub.build = short_circuit
+        stub.run = short_circuit
+        stub.schedule_run = short_circuit
+        stub.outputs = short_circuit
+        stub.share_outputs = short_circuit
+        stub.release_outputs = short_circuit
+        stub.add_sink = short_circuit
+        stub.checkpoint = short_circuit
+        stub.set_outputs = short_circuit
+        stub.executor_statistics = short_circuit
+        stub.external_source_shm_statistics = short_circuit
+        return stub
 
 
 def _shutdown_pipelines():
@@ -1690,7 +1956,7 @@ def _regroup_args(func, pipeline_def_kwargs, fn_call_kwargs):
 def _preprocess_pipe_func(func, conditionals_on):
     """Transform the pipeline definition function if the conditionals are enabled"""
     if conditionals_on:
-        return _conditionals._autograph.to_graph(func)
+        return _conditionals._autograph.convert(recursive=True, user_requested=True)(func)
     else:
         return func
 
@@ -1747,8 +2013,7 @@ def _generate_graph(pipe, func, fn_args, fn_kwargs):
 @overload
 def pipeline_def(
     __func: Callable[..., Union[DataNode, Tuple[DataNode, ...]]]
-) -> Callable[..., Pipeline]:
-    ...
+) -> Callable[..., Pipeline]: ...
 
 
 # Decorator with arguments
@@ -1765,8 +2030,6 @@ def pipeline_def(
     exec_async: bool = True,
     bytes_per_sample: int = 0,
     set_affinity: bool = False,
-    max_streams: int = -1,
-    default_cuda_stream_priority: int = 0,
     enable_memory_stats: bool = False,
     enable_checkpointing: bool = False,
     checkpoint: Optional[Any] = None,
@@ -1775,8 +2038,7 @@ def pipeline_def(
     py_callback_pickler: Optional[Any] = None,
     output_dtype: Union[types.DALIDataType, Tuple[types.DALIDataType, ...], None] = None,
     output_ndim: Union[int, Tuple[int, ...], None] = None,
-) -> Callable[[Callable[..., Union[DataNode, Tuple[DataNode, ...]]]], Callable[..., Pipeline]]:
-    ...
+) -> Callable[[Callable[..., Union[DataNode, Tuple[DataNode, ...]]]], Callable[..., Pipeline]]: ...
 
 
 # Implementation
@@ -1800,7 +2062,7 @@ def pipeline_def(
     The decorated function returns a DALI Pipeline object::
 
         pipe = my_pipe(True, False)
-        # pipe.build()  # the pipeline is not configured properly yet
+        # pipe.run()  # the pipeline is not configured properly yet
 
     A pipeline requires additional parameters such as batch size, number of worker threads,
     GPU device id and so on (see :meth:`nvidia.dali.Pipeline()` for a
@@ -1809,9 +2071,9 @@ def pipeline_def(
     passed to the decorated function::
 
         pipe = my_pipe(True, False, batch_size=32, num_threads=1, device_id=0)
-        pipe.build()  # the pipeline is properly configured, we can build it now
 
-    The outputs from the original function became the outputs of the Pipeline::
+    The pipeline is properly configured, we can run it now. The outputs from the original function
+    became the outputs of the Pipeline::
 
         flipped, img = pipe.run()
 
@@ -1865,12 +2127,20 @@ def pipeline_def(
     """
 
     def actual_decorator(func):
+        if _conditionals._autograph.is_autograph_artifact(func):
+            raise ValueError("Pipeline definition cannot be marked with @do_not_convert.")
+
         @functools.wraps(func)
         def create_pipeline(*args, **kwargs):
             conditionals_on = kwargs.get("enable_conditionals", enable_conditionals)
 
             pipe_func = _preprocess_pipe_func(func, conditionals_on)
-            pipeline_args, fn_kwargs = _regroup_args(pipe_func, pipeline_kwargs, kwargs)
+            # TODO(klecki): Rewrite _discriminate_args used by _regroup_args in the means of the
+            # inspect.signature, so it obeys the signature produced by the wrapper.
+            # The getfullargspec ignores wrappers, so we need to use func here for argument
+            # redistribution, as _preprocess_pipe_func returns a wrapper in conditional mode.
+            # After this we can pass pipe_func below.
+            pipeline_args, fn_kwargs = _regroup_args(func, pipeline_kwargs, kwargs)
             pipe = Pipeline(**pipeline_args)
             _preprocess_pipe_object(pipe, conditionals_on, args, fn_kwargs)
 
@@ -1882,6 +2152,107 @@ def pipeline_def(
         return create_pipeline
 
     return actual_decorator(fn) if fn else actual_decorator
+
+
+# Callable preserving a signature
+_F = TypeVar("_F", bound=Callable[..., Any])
+
+
+def do_not_convert(func: _F = None) -> _F:
+    """Decorator that suppresses the conversion of a function by AutoGraph.
+
+    In conditional mode, DALI uses a fork of
+    `TensorFlow's AutoGraph <https://github.com/tensorflow/tensorflow/blob/master/tensorflow/python/autograph/g3doc/reference/index.md>`_
+    to transform the code, enabling us to rewrite and detect the ``if`` statements, so they can be
+    used in processing the DALI pipeline.
+
+    The AutoGraph conversion is applied to any top-level function or method called within the
+    pipeline definition (as well as the pipeline definition itself).
+    When a function is converted, all functions defined within its syntactical scope are also
+    converted. The rewriting, among other effects, makes these functions non-serializable.
+
+    To stop a function from being converted, its top-level encompassing function must be marked
+    with this decorator. This may sometimes require refactoring the function to outer scope.
+
+    Parallel mode of :meth:`external source <nvidia.dali.fn.external_source>` (``parallel=True``),
+    requires that its ``source`` parameter is serializable. To prevent the rewriting of the
+    ``source``, the functions that are used to create the ``source``,
+    should be decorated with :meth:`@do_not_convert <nvidia.dali.pipeline.do_not_convert>`.
+
+    .. note::
+       Only functions that do not process :class:`DataNode` (so do not use DALI operators)
+       should be marked with this decorator.
+
+    For example::
+
+        from nvidia.dali import pipeline_def, fn
+
+        @pipeline_def(enable_conditionals=True)
+        def pipe():
+
+            def source_factory(size):
+                def source_fun(sample_info):
+                    return np.full(size, sample_info.iter_idx)
+                return source_fun
+
+            source = source_factory(size=(2, 1))
+            return fn.external_source(source=source, parallel=True, batch=False)
+
+    Should be converted into::
+
+        from nvidia.dali import pipeline_def, fn
+        from nvidia.dali.pipeline import do_not_convert
+
+        @do_not_convert
+        def source_factory(size):
+            def source_fun(sample_info):
+                return np.full(size, sample_info.iter_idx)
+            return source_fun
+
+        @pipeline_def(enable_conditionals=True)
+        def pipe():
+            source = source_factory(size=(2, 1))
+            return fn.external_source(source=source, parallel=True, batch=False)
+
+    The ``source_factory`` must be factored out, otherwise it would be converted as a part of
+    pipeline definition. As we are interested in preventing the AutoGraph conversion of
+    ``source_fun`` we need to decorate its top-level encompassing function.
+
+    .. note::
+       If a function is declared outside of the pipeline definition, and is passed as a parameter,
+       but not directly invoked within the pipeline definition, it will not be converted.
+       In such case, a callback passed to
+       :meth:`external source <nvidia.dali.fn.external_source>` operator,
+       :meth:`python function <nvidia.dali.fn.python_function>` operator family or
+       :meth:`Numba function <nvidia.dali.plugin.numba.fn.experimental.numba_function>` operator
+       is not considered as being directly invoked in pipeline definition. Such callback is
+       executed when the pipeline is run, so after the pipeline is defined and built.
+
+    For example::
+
+        from nvidia.dali import pipeline_def, fn
+
+        def source_fun(sample_info):
+            return np.full((2, 2), sample_info.iter_idx)
+
+        @pipeline_def(enable_conditionals=True)
+        def pipe():
+            return fn.external_source(source=source_fun, batch=False)
+
+    The ``source_fun`` won't be converted, as it is defined outside of pipeline definition and
+    it is only passed via name to external source.
+    """  # noqa(E501)
+
+    if func is None:
+        return do_not_convert
+
+    if getattr(func, "_is_pipeline_def", False):
+        raise ValueError("Pipeline definition cannot be marked with @do_not_convert.")
+
+    # Marking a function as autograph_artifact will prevent it from being converted without
+    # adding any intermediate functions or adjusting the code. This is more lightweight solution
+    # that should keep numba happy.
+    return _conditionals._autograph.autograph_artifact(func)
 
 
 def _collect_ops(output_nodes):
@@ -1904,37 +2275,26 @@ def _collect_ops(output_nodes):
             else:
                 yield inp
 
-    def get_op_outputs_num():
-        # BSF traverse the graph first to learn, for each reachable operator in the graph,
-        # how many data-nodes/edges the operator contributes to
-        # (i.e. the number of outputs of the operator instance)
-        op_outputs_num = {}
-        edges = deque(output_nodes)
-        while edges:
-            current_edge = edges.popleft()
-            source_op = get_source_op(current_edge)
-            if source_op.id in op_outputs_num:
-                op_outputs_num[source_op.id] += 1
-            else:
-                op_outputs_num[source_op.id] = 1
-                source_op.check_args()
-                edges.extend(get_op_input_edges(source_op))
-        return op_outputs_num
-
+    visited = set()
     ops = []
-    edges = deque(output_nodes)
-    op_total_outputs_num = get_op_outputs_num()
-    op_visited_outputs_num = {op_id: 0 for op_id in op_total_outputs_num}
-    while edges:
-        current_edge = edges.popleft()
-        source_op = get_source_op(current_edge)
-        op_visited_outputs_num[source_op.id] += 1
-        # Actually visit the operator only when all the nodes it contributes to
-        # were already processed
-        if op_visited_outputs_num[source_op.id] == op_total_outputs_num[source_op.id]:
-            ops.append(source_op)
-            edges.extend(get_op_input_edges(source_op))
-    ops.reverse()
+
+    # Depth-first search returns the graph topologically sorted.
+    # We go over each operator's inputs before adding it to the list.
+
+    def visit_op(op):
+        if id(op) in visited:
+            return
+        visited.add(id(op))
+        op.check_args()
+        # visit conttributing inputs
+        for edge in get_op_input_edges(op):
+            visit_op(get_source_op(edge))
+        # add the operator to the list of contributing ops
+        ops.append(op)
+
+    for edge in output_nodes:
+        visit_op(get_source_op(edge))
+
     return ops
 
 
@@ -1969,7 +2329,8 @@ def _pipeline_def_experimental(fn=None, *, enable_conditionals=False, **pipeline
             conditionals_on = kwargs.get("enable_conditionals", enable_conditionals)
 
             pipe_func = _preprocess_pipe_func(func, conditionals_on)
-            pipeline_args, fn_kwargs = _regroup_args(pipe_func, pipeline_kwargs, kwargs)
+            # TODO(klecki): Use pipe_func here after similar todo is resolved in regular decorator.
+            pipeline_args, fn_kwargs = _regroup_args(func, pipeline_kwargs, kwargs)
             if debug_mode_on:
                 pipe = _PipelineDebug(
                     functools.partial(pipe_func, *args, **fn_kwargs), **pipeline_args

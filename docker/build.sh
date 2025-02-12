@@ -5,7 +5,7 @@ a build environment
 
 To change build configuration please export appropriate env variables (for exact meaning please check the README):
 PYVER=[default 3.8, required only by Run image]
-CUDA_VERSION=[default 12.3, accepts also 11.0, 11.1, 11.2, 11.3, 11.4, 11.5, 11.6, 11.7, 11.8, 12.0, 12.1 and 12.2]
+CUDA_VERSION=[default 12.8, accepts also 11.0, 11.1, 11.2, 11.3, 11.4, 11.5, 11.6, 11.7, 11.8, 12.0, 12.1, 12.2, 12.3, 12.4, 12.5, 12.6 and 12.8]
 NVIDIA_BUILD_ID=[default 12345]
 CREATE_WHL=[default YES]
 CREATE_RUNNER=[default NO]
@@ -40,16 +40,17 @@ shift $((OPTIND - 1))
 export ARCH=${ARCH:-x86_64}
 export PYVER=${PYVER:-3.8}
 export PYV=${PYVER/./}
-export CUDA_VERSION=${CUDA_VERSION:-12.3}
+export CUDA_VERSION=${CUDA_VERSION:-12.8}
 export CUDA_VER=${CUDA_VERSION//./}
 
 if [ "${CUDA_VERSION%%\.*}" ]
 then
   if [ $CUDA_VER != "110" ] && [ $CUDA_VER != "111" ] && [ $CUDA_VER != "112" ] && [ $CUDA_VER != "113" ] && \
      [ $CUDA_VER != "114" ] && [ $CUDA_VER != "115" ] && [ $CUDA_VER != "116" ] && [ $CUDA_VER != "117" ] && [ $CUDA_VER != "118" ] && \
-     [ $CUDA_VER != "120" ] && [ $CUDA_VER != "121" ] && [ $CUDA_VER != "122" ] && [ $CUDA_VER != "123" ]
+     [ $CUDA_VER != "120" ] && [ $CUDA_VER != "121" ] && [ $CUDA_VER != "122" ] && [ $CUDA_VER != "123" ] && [ $CUDA_VER != "124" ] && \
+     [ $CUDA_VER != "125" ] && [ $CUDA_VER != "126" ] && [ $CUDA_VER != "128" ]
   then
-      echo "Wrong CUDA_VERSION=$CUDA_VERSION provided. Only 11.0, 11.1, 11.2, 11.3, 11.4, 11.5, 11.6, 11.7, 11.8, 12.0, 12.1, 12.2 and 12.3 are supported"
+      echo "Wrong CUDA_VERSION=$CUDA_VERSION provided. Only 11.0, 11.1, 11.2, 11.3, 11.4, 11.5, 11.6, 11.7, 11.8, 12.0, 12.1, 12.2, 12.3, 12.4, 12.5, 12.6 and 12.8 are supported"
       exit 1
   fi
 else
@@ -172,11 +173,13 @@ if [ "$BUILD_INHOST" == "YES" ]; then
                                         BUILD_CFITSIO=${BUILD_CFITSIO}            \
                                         BUILD_CUFILE=${BUILD_CUFILE}              \
                                         BUILD_NVCOMP=${BUILD_NVCOMP}              \
+                                        BUILD_NVIMAGECODEC=${BUILD_NVIMAGECODEC}      \
                                         LINK_DRIVER=${LINK_DRIVER}                \
                                         WITH_DYNAMIC_CUDA_TOOLKIT=${WITH_DYNAMIC_CUDA_TOOLKIT} \
                                         WITH_DYNAMIC_NVJPEG=${WITH_DYNAMIC_NVJPEG:-ON} \
                                         WITH_DYNAMIC_CUFFT=${WITH_DYNAMIC_CUFFT:-ON} \
                                         WITH_DYNAMIC_NPP=${WITH_DYNAMIC_NPP:-ON}  \
+                                        WITH_DYNAMIC_NVIMGCODEC=${WITH_DYNAMIC_NVIMGCODEC:-ON}  \
                                         STRIP_BINARY=${STRIP_BINARY}              \
                                         VERBOSE_LOGS=${VERBOSE_LOGS}              \
                                         WERROR=${WERROR}                          \

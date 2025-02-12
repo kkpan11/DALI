@@ -1,4 +1,4 @@
-// Copyright (c) 2020-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2020-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,15 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "dali/operators/reader/loader/numpy_loader.h"
 #include <dirent.h>
 #include <errno.h>
 #include <cstdlib>
 #include <memory>
-
 #include "dali/core/common.h"
-#include "dali/operators/reader/loader/numpy_loader.h"
-#include "dali/util/file.h"
+#include "dali/operators/reader/loader/filesystem.h"
 #include "dali/operators/reader/loader/utils.h"
+#include "dali/util/file.h"
+#include "dali/util/uri.h"
 
 namespace dali {
 namespace detail {
@@ -49,7 +50,9 @@ void NumpyHeaderCache::UpdateCache(const string &file_name, const numpy::HeaderD
 }  // namespace detail
 
 void NumpyLoader::ReadSample(NumpyFileWrapper& target) {
-  auto filename = files_[current_index_++];
+  const auto& entry = file_entries_[current_index_++];
+  auto filename = entry.filename;
+  auto size = entry.size;
 
   // handle wrap-around
   MoveToNextShard(current_index_);
@@ -70,14 +73,18 @@ void NumpyLoader::ReadSample(NumpyFileWrapper& target) {
   }
 
   auto path = filesystem::join_path(file_root_, filename);
-  auto current_file = FileStream::Open(path, read_ahead_, !copy_read_data_, use_o_direct_);
+  FileStream::Options opts;
+  opts.read_ahead = read_ahead_;
+  opts.use_mmap = !copy_read_data_;
+  opts.use_odirect = use_o_direct_;
+  auto current_file = FileStream::Open(path, opts, size);
 
   // read the header
   numpy::HeaderData header;
   auto ret = header_cache_.GetFromCache(filename, header);
   try {
     if (!ret) {
-      if (use_o_direct_) {
+      if (opts.use_odirect) {
         numpy::ParseODirectHeader(header, current_file.get(), o_direct_alignm_,
                                   o_direct_read_len_alignm_);
       } else {
@@ -86,7 +93,7 @@ void NumpyLoader::ReadSample(NumpyFileWrapper& target) {
       header_cache_.UpdateCache(filename, header);
     }
   } catch (const std::runtime_error &e) {
-    DALI_FAIL(e.what() + ". File: " + filename);
+    DALI_FAIL(e.what(), ". File: ", filename);
   }
   current_file->SeekRead(header.data_offset);
 
@@ -98,7 +105,7 @@ void NumpyLoader::ReadSample(NumpyFileWrapper& target) {
   target.nbytes = nbytes;
   target.filename = std::move(path);
 
-  if (copy_read_data_) {
+  if (!opts.use_mmap || !current_file->CanMemoryMap()) {
     target.current_file = std::move(current_file);
   } else {
     auto p = current_file->Get(nbytes);

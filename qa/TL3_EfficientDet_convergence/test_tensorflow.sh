@@ -9,6 +9,10 @@ pushd /opt/dali/docs/examples/use_cases/tensorflow/efficientdet
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 
+# turn off SHARP to avoid NCCL errors
+export NCCL_NVLS_ENABLE=0
+# workaround for https://github.com/tensorflow/tensorflow/issues/63548
+export WRAPT_DISABLE_EXTENSIONS=1
 
 python train.py                                                                                     \
     --epochs 1                                                                                      \

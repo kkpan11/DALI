@@ -1,4 +1,4 @@
-# Copyright (c) 2021-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2021-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,10 +17,9 @@ import nvidia.dali as dali
 import os
 import tempfile
 from glob import glob
-from nose.tools import assert_equal
+from nose_utils import assert_equals, assert_raises
 
 import webdataset_base as base
-from nose_utils import assert_raises
 from test_utils import compare_pipelines, get_dali_extra_path
 
 
@@ -111,8 +110,7 @@ def test_single_sample():
         device_id=0,
         num_threads=1,
     )
-    wds_pipeline.build()
-    assert_equal(list(wds_pipeline.epoch_size().values())[0], num_samples)
+    assert_equals(list(wds_pipeline.epoch_size().values())[0], num_samples)
 
 
 def test_single_sample_and_junk():
@@ -147,8 +145,7 @@ def test_single_sample_and_junk():
         device_id=0,
         num_threads=1,
     )
-    wds_pipeline.build()
-    assert_equal(list(wds_pipeline.epoch_size().values())[0], num_samples)
+    assert_equals(list(wds_pipeline.epoch_size().values())[0], num_samples)
 
 
 def test_wide_sample():
@@ -188,8 +185,7 @@ def test_wide_sample():
         device_id=0,
         num_threads=1,
     )
-    wds_pipeline.build()
-    assert_equal(list(wds_pipeline.epoch_size().values())[0], num_samples)
+    assert_equals(list(wds_pipeline.epoch_size().values())[0], num_samples)
 
 
 def test_argument_errors():
@@ -250,7 +246,6 @@ def general_index_error(
         device_id=0,
         num_threads=1,
     )
-    webdataset_pipeline.build()
     webdataset_pipeline.run()
     webdataset_pipeline.run()
 

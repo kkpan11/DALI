@@ -1,4 +1,4 @@
-// Copyright (c) 2018-2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2018-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -30,9 +30,9 @@ ThreadPool::ThreadPool(int num_thread, int device_id, bool set_affinity, const c
     , active_threads_(0) {
   DALI_ENFORCE(num_thread > 0, "Thread pool must have non-zero size");
 #if NVML_ENABLED
-  // only for the CPU pipeline
-  if (device_id != CPU_ONLY_DEVICE_ID) {
-    nvml::Init();
+  // We use NVML only for setting thread affinity
+  if (device_id != CPU_ONLY_DEVICE_ID && set_affinity) {
+    nvml_handle_ = nvml::NvmlInstance::CreateNvmlInstance();
   }
 #endif
   // Start the threads in the main loop
@@ -54,9 +54,6 @@ ThreadPool::~ThreadPool() {
   for (auto &thread : threads_) {
     thread.join();
   }
-#if NVML_ENABLED
-  nvml::Shutdown();
-#endif
 }
 
 void ThreadPool::AddWork(Work work, int64_t priority, bool start_immediately) {

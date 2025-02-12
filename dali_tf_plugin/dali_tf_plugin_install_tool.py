@@ -28,12 +28,12 @@ from dali_tf_plugin_utils import (
     get_tf_build_flags,
 )
 import os
-from distutils.version import StrictVersion, LooseVersion
+from packaging.version import Version
 from pathlib import Path
 import tempfile
 from stubgen import stubgen
 from multiprocessing import Process
-import subprocess
+import subprocess  # nosec B404
 
 
 def plugin_load_and_test(dali_tf_path):
@@ -129,7 +129,7 @@ class InstallerHelper:
         self.can_install_prebuilt = (
             not self.always_build
             and bool(self.tf_compiler)
-            and StrictVersion(self.tf_compiler) >= StrictVersion("5.0")
+            and Version(self.tf_compiler) >= Version("5.0")
             and self.is_compatible_with_prebuilt_bin
             and self.prebuilt_dali_stub is not None
         )
@@ -162,8 +162,8 @@ class InstallerHelper:
             or self.default_cpp_version == self.tf_compiler
             or not bool(self.tf_compiler)
             or (
-                StrictVersion(self.default_cpp_version) >= StrictVersion("5.0")
-                and StrictVersion(self.tf_compiler) >= StrictVersion("5.0")
+                Version(self.default_cpp_version) >= Version("5.0")
+                and Version(self.tf_compiler) >= Version("5.0")
             )
         )
 
@@ -232,11 +232,13 @@ class InstallerHelper:
                 # try in a separate process just in case it recives SIGV
                 p = Process(target=test_fn, args=(lib_path_tmpdir,))
                 p.start()
-                p.join(5)
+                p.join(10)
                 ret = p.exitcode
                 if ret is None:
                     p.terminate()
                     p.join()
+                if ret != 0:
+                    print(f"Failed to import TF library, importing returned {ret}")
                 return ret == 0
             except Exception as e:
                 print("Failed to import TF library: ", str(e))
@@ -280,7 +282,7 @@ class InstallerHelper:
             return True
         else:
             print(
-                "Failed check for {self.prebuilt_plugin_best_match},"
+                f"Failed check for {self.prebuilt_plugin_best_match},"
                 + "will not install prebuilt plugin"
             )
             return False
@@ -339,22 +341,19 @@ class InstallerHelper:
             dali_lflags = "-L" + tmpdir + " -ldali"
             dali_cflags = "-I" + os.path.join(self.src_path, "include")
 
-            cmd = (
-                compiler
-                + " -Wl,-R,'$ORIGIN/..' -std=c++14 -DNDEBUG -shared "
-                + dali_stub_src
-                + " -o "
-                + dali_stub_lib
-                + " -fPIC "
-                + dali_cflags
-                + " "
-                + cuda_cflags
-                + " "
-                + cuda_lflags
-                + " -O2"
-            )
-            print("Building DALI stub lib:\n\n " + cmd + "\n\n")
-            subprocess.check_call(cmd, cwd=self.src_path, shell=True)
+            cmd = [compiler, "-Wl,-R,$ORIGIN/..", "-std=c++14", "-DNDEBUG", "-shared"]
+            cmd += dali_stub_src.split()
+            cmd += ["-o"]
+            cmd += dali_stub_lib.split()
+            cmd += ["-fPIC"]
+            cmd += dali_cflags.split()
+            cmd += cuda_cflags.split()
+            cmd += cuda_lflags.split()
+            cmd += ["-O2"]
+
+            cmd = list(filter(lambda x: len(x) != 0, cmd))
+            print("Building DALI stub lib:\n\n " + " ".join(cmd) + "\n\n")
+            subprocess.check_call(cmd, cwd=self.src_path, shell=False)  # nosec B603
 
             tf_cflags, tf_lflags = get_tf_build_flags()
 
@@ -367,38 +366,36 @@ class InstallerHelper:
             lib_path = os.path.join(self.plugin_dest_dir, lib_filename)
 
             # for a newer TF we need to compiler with C++17
-            cpp_ver = "--std=c++14" if self.tf_version < LooseVersion("2.10") else "--std=c++17"
+            cpp_ver = "--std=c++14" if Version(self.tf_version) < Version("2.10") else "--std=c++17"
             # Note: DNDEBUG flag is needed due to issue with TensorFlow custom ops:
             # https://github.com/tensorflow/tensorflow/issues/17316
             # Do not remove it.
             # the latest TF in conda needs to include /PREFIX/include
             root_include = "-I" + os.getenv("PREFIX", default="/usr") + "/include"
-            cmd = (
-                compiler
-                + " -Wl,-R,'$ORIGIN/..' -Wl,-rpath,'$ORIGIN' "
-                + cpp_ver
-                + " -DNDEBUG -shared "
-                + plugin_src
-                + " -o "
-                + lib_path
-                + " -fPIC "
-                + dali_cflags
-                + " "
-                + tf_cflags
-                + " "
-                + root_include
-                + " "
-                + cuda_cflags
-                + " "
-                + dali_lflags
-                + " "
-                + tf_lflags
-                + " "
-                + cuda_lflags
-                + " -O2"
-            )
-            print("Build DALI TF library:\n\n " + cmd + "\n\n")
-            subprocess.check_call(cmd, cwd=self.src_path, shell=True)
+            cmd = [
+                compiler,
+                "-Wl,-R,$ORIGIN/..",
+                "-Wl,-rpath,$ORIGIN",
+                cpp_ver,
+                "-DNDEBUG",
+                "-shared",
+            ]
+            cmd += plugin_src.split()
+            cmd += ["-o"]
+            cmd += lib_path.split()
+            cmd += ["-fPIC"]
+            cmd += dali_cflags.split()
+            cmd += tf_cflags.split()
+            cmd += root_include.split()
+            cmd += cuda_cflags.split()
+            cmd += dali_lflags.split()
+            cmd += tf_lflags.split()
+            cmd += cuda_lflags.split()
+            cmd += ["-O2"]
+
+            cmd = list(filter(lambda x: len(x) != 0, cmd))
+            print("Build DALI TF library:\n\n " + " ".join(cmd) + "\n\n")
+            subprocess.check_call(cmd, cwd=self.src_path, shell=False)  # nosec B603
 
             if not self.check_plugin(lib_path, dali_stub_lib):
                 raise ImportError(

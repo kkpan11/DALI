@@ -1,4 +1,4 @@
-#  Copyright (c) 2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#  Copyright (c) 2023-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 #  Licensed under the Apache License, Version 2.0 (the "License");
 #  you may not use this file except in compliance with the License.
@@ -15,13 +15,12 @@
 
 import numpy as np
 import nvidia.dali.fn as fn
-from nose.plugins.attrib import attr
+from nose_utils import attr, raises
 from nose2.tools import params
 from numpy.random import default_rng
 from nvidia.dali import pipeline_def
 from nvidia.dali.tensors import TensorCPU, TensorGPU
 
-from nose_utils import raises
 from test_utils import to_array
 
 max_batch_size = 256
@@ -134,7 +133,6 @@ def test_pipeline_inputs_prefetch_queue_depth(use_copy_kernel, blocking):
     rng = default_rng()
     n_iterations = 8
     p = identity_pipe(use_copy_kernel, blocking, prefetch_queue_depth=1)
-    p.build()
     for _ in range(n_iterations):
         batch_size = rng.integers(1, max_batch_size)
         random_in = rng.random(size=(batch_size, 4, 6, 2))
@@ -179,7 +177,6 @@ def test_pipeline_inputs_exec_pipelined(use_copy_kernel, blocking):
     rng = default_rng()
     n_iterations = 8
     p = identity_pipe(use_copy_kernel, blocking, exec_pipelined=False, exec_async=False)
-    p.build()
     for _ in range(n_iterations):
         batch_size = rng.integers(1, max_batch_size)
         random_in = rng.random(size=(batch_size, 4, 6, 2))
@@ -212,7 +209,6 @@ def test_pipeline_inputs_exec_pipelined(use_copy_kernel, blocking):
 @raises(RuntimeError, glob="*`prefetch_queue_depth` in Pipeline constructor shall be set to 1*")
 def test_incorrect_prefetch_queue_depth():
     p = identity_pipe(False, False)
-    p.build()
     rng = default_rng()
     batch_size = rng.integers(1, max_batch_size)
     random_in = rng.random(size=(batch_size, 4, 6, 2))

@@ -26,7 +26,6 @@ Enabling checkpointing shouldn't have any impact on the performance.
       ...
 
   p = pipeline()
-  p.build()
 
 
 .. note::
@@ -66,7 +65,6 @@ Such a pipeline should then return exactly the same outputs as the original one.
 
   checkpoint = open('checkpoint_file.cpt', 'rb').read()
   p_restored = pipeline(checkpoint=checkpoint)
-  p_restored.build()
 
 .. warning::
     Make sure that the pipeline that you're restoring is the same as the original one,
@@ -87,3 +85,17 @@ Their state won't be saved in a checkpoint and
 after restoring from a checkpoint, they will start from the beginning.
 If you want to use checkpointing, we recommend you rewrite your source
 to be a supported callable.
+
+Checkpointing in TensorFlow plugin
+----------------------------------
+
+:class:`plugin.tf.DALIDataset` is integrated with TensorFlow's ``tf.train.checkpoint``.
+Please refer to
+`TensorFlow checkpointing documentation page <https://www.tensorflow.org/guide/checkpoint#manual_checkpointing>`_
+for more details.
+
+.. warning::
+    Checkpointing is currently not supported for :class:`plugin.tf.experimental.DALIDatasetWithInputs`.
+
+.. warning::
+    Checkpointing is currently not supported for GPU datasets.

@@ -1,4 +1,4 @@
-# Copyright (c) 2019-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2019-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import numpy as np
-import nvidia.dali as dali
 import nvidia.dali.fn as fn
 import nvidia.dali.ops as ops
 import nvidia.dali.types as types
@@ -23,8 +22,7 @@ from nvidia.dali import pipeline_def
 from nvidia.dali.pipeline import Pipeline
 
 from nose2.tools import params
-from nose_utils import assert_raises
-from nose_utils import raises
+from nose_utils import raises, assert_raises
 from test_slice import check_slice_output, abs_slice_start_and_end
 from test_utils import RandomDataIterator
 from test_utils import as_array
@@ -660,7 +658,6 @@ def check_cmn_crop_sequence_length(
         pad_output=should_pad,
         crop_seq_as_depth=True,
     )
-    pipe.build()
     out = pipe.run()
     out_data = out[0]
 
@@ -768,16 +765,10 @@ def check_cmn_with_out_of_bounds_policy_support(
 
     if fill_values is None:
         fill_values = 0
-    pipe.build()
-    for k in range(3):
-        outs = pipe.run()
-        out = outs[0]
-        in_data = outs[1]
-        mirror_data = outs[2]
-        if isinstance(out, dali.backend_impl.TensorListGPU):
-            out = out.as_cpu()
-        if isinstance(in_data, dali.backend_impl.TensorListGPU):
-            in_data = in_data.as_cpu()
+    for _ in range(3):
+        out, in_data, mirror_data = pipe.run()
+        out = out.as_cpu()
+        in_data = in_data.as_cpu()
 
         assert batch_size == len(out)
         for idx in range(batch_size):
@@ -866,7 +857,6 @@ def check_cmn_with_out_of_bounds_error(cmn_op, device, batch_size, input_shape=(
         crop_pos_y=crop_y,
         out_of_bounds_policy="error",
     )
-    pipe.build()
     pipe.run()
 
 
@@ -904,20 +894,14 @@ def check_cmn_per_sample_norm_args(cmn_fn, device, rand_mean, rand_stdev, scale,
 
     batch_size = 10
     p = pipe(batch_size=batch_size)
-    p.build()
+    ref_scale = scale or 1.0
+    ref_shift = shift or 0.0
     for _ in range(3):
-        outs = p.run()
+        outs = tuple(np.array(out.as_cpu()) for out in p.run())
         for s in range(batch_size):
-            out, image_like, mean, std = [
-                np.array(o[s].as_cpu())
-                if isinstance(o, dali.backend_impl.TensorListGPU)
-                else np.array(o[s])
-                for o in outs
-            ]
-        ref_scale = scale or 1.0
-        ref_shift = shift or 0.0
-        ref_out = ref_scale * (image_like - mean) / std + ref_shift
-        np.testing.assert_allclose(out, ref_out, atol=ref_scale * 1e-6)
+            out, image_like, mean, std = tuple(np.array(o[s]) for o in outs)
+            ref_out = ref_scale * (image_like - mean) / std + ref_shift
+            np.testing.assert_allclose(out, ref_out, atol=ref_scale * 1e-6)
 
 
 def test_per_sample_norm_args():
@@ -950,9 +934,8 @@ def check_crop_mirror_normalize_wrong_layout(
         return cmn_fn(data, crop_h=10, crop_w=10)
 
     pipe = get_pipe(batch_size=batch_size, device_id=0, num_threads=3)
-    pipe.build()
     with assert_raises(
-        RuntimeError, glob=f'The layout "{layout}" does not match any of the allowed layouts'
+        ValueError, glob=f'The layout "{layout}" does not match any of the allowed layouts'
     ):
         pipe.run()
 
@@ -983,7 +966,6 @@ def check_crop_mirror_normalize_empty_layout(cmn_fn, device, batch_size, input_s
         return cmn_fn(data, crop_h=10, crop_w=20)
 
     pipe = get_pipe(batch_size=batch_size, device_id=0, num_threads=3)
-    pipe.build()
     (data,) = pipe.run()
     for i in range(batch_size):
         assert as_array(data[i]).shape == (3, 10, 20)  # CHW by default

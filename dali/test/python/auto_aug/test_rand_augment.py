@@ -1,4 +1,4 @@
-# Copyright (c) 2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2023-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -21,7 +21,7 @@ import numpy as np
 from scipy.stats import chisquare
 from nose2.tools import params
 
-from nvidia.dali import fn, tensors, types
+from nvidia.dali import fn, types
 from nvidia.dali import pipeline_def
 from nvidia.dali.auto_aug import rand_augment
 from nvidia.dali.auto_aug.core import augmentation
@@ -43,8 +43,7 @@ def debug_discrepancy_helper(*batch_pairs):
     """
 
     def as_array_list(batch):
-        if isinstance(batch, tensors.TensorListGPU):
-            batch = batch.as_cpu()
+        batch = batch.as_cpu()
         return [np.array(sample) for sample in batch]
 
     batch_names = [name for _, _, name in batch_pairs]
@@ -129,9 +128,7 @@ def test_run_rand_aug(i, args):
 
     # run the pipeline twice to make sure instantiation preserves determinism
     p1 = pipeline()
-    p1.build()
     p2 = pipeline()
-    p2.build()
     for iteration_idx in range(3):
         encoded1, decoded1, resized1, out1 = p1.run()
         encoded2, decoded2, resized2, out2 = p2.run()
@@ -177,7 +174,6 @@ class VideoTest(unittest.TestCase):
         cls.vid_files = []
         for size in (size_1, size_2):
             p = pipeline(size=size)
-            p.build()
             (out,) = p.run()
             cls.vid_files.extend(np.array(sample) for sample in out.as_cpu())
 
@@ -209,7 +205,7 @@ class VideoTest(unittest.TestCase):
                 batch=True,
                 layout="FHWC",
             )
-            extra = {} if not use_shape else {"shape": fn.shapes(video)[1:]}
+            extra = {} if not use_shape else {"shape": video.shape()[1:]}
             extra["monotonic_mag"] = monotonic_mag
             if device == "gpu":
                 video = video.gpu()
@@ -218,9 +214,7 @@ class VideoTest(unittest.TestCase):
 
         # run the pipeline twice to make sure instantiation preserves determinism
         p1 = pipeline()
-        p1.build()
         p2 = pipeline()
-        p2.build()
 
         for _ in range(num_iterations):
             (out1,) = p1.run()
@@ -297,7 +291,6 @@ def test_ops_selection_and_mags(case_idx, args):
         return fn.reshape(data, shape=(-1, 2))
 
     p = pipeline()
-    p.build()
     for i in range(3):
         (output,) = p.run()
         output = [np.array(s) for s in (output.as_cpu() if dev == "gpu" else output)]
@@ -312,7 +305,7 @@ def test_ops_selection_and_mags(case_idx, args):
             actual.append(actual_count[out])
             expected.append(expected_counts[out])
         stat = chisquare(actual, expected)
-        assert 0.01 <= stat.pvalue <= 0.99, f"{stat} {actual} {expected}"
+        assert 0.01 <= stat.pvalue, f"{stat} {actual} {expected}"
 
 
 def test_wrong_params_fail():

@@ -1,4 +1,4 @@
-// Copyright (c) 2019-2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2019-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -64,8 +64,6 @@ class OpticalFlow : public StatelessOperator<Backend> {
         enable_external_hints_(spec.GetArgument<bool>(detail::kEnableExternalHintsArgName)),
         of_params_({quality_factor_, out_grid_size_, hint_grid_size_, enable_temporal_hints_,
                     enable_external_hints_}),
-        optical_flow_(std::unique_ptr<optical_flow::OpticalFlowAdapter<ComputeBackend>>(
-            new optical_flow::OpticalFlowStub<ComputeBackend>(of_params_))),
         image_type_(spec.GetArgument<DALIImageType>(detail::kImageTypeArgName)),
         device_id_(spec.GetArgument<int>("device_id")) {
     // In case external hints are enabled, we need 2 inputs
@@ -74,11 +72,12 @@ class OpticalFlow : public StatelessOperator<Backend> {
                  std::to_string(spec.NumInput()));
     sync_ = CUDAEvent::Create(device_id_);
 #if NVML_ENABLED
-    nvml::Init();
+    nvml_handle_ = nvml::NvmlInstance::CreateNvmlInstance();
 #endif
   }
 
-  ~OpticalFlow();
+  ~OpticalFlow() {}
+
   DISABLE_COPY_MOVE_ASSIGN(OpticalFlow);
 
  protected:
@@ -134,28 +133,18 @@ class OpticalFlow : public StatelessOperator<Backend> {
 
   void RunImpl(Workspace &ws) override;
 
-  bool CanInferOutputs() const override {
-    return true;
-  }
-
  private:
   /**
    * Optical flow lazy initialization
    */
   void of_lazy_init(size_t width, size_t height, size_t channels, DALIImageType image_type,
                     int device_id, cudaStream_t stream) {
-    std::call_once(of_initialized_,
-                   [&]() {
-                       optical_flow_.reset(
-                               new optical_flow::OpticalFlowImpl(of_params_,
-                                                                 width,
-                                                                 height,
-                                                                 channels,
-                                                                 image_type,
-                                                                 device_id,
-                                                                 stream));
-                        optical_flow_->Init(of_params_);
-                   });
+    if (!optical_flow_) {
+      auto flow = std::make_unique<optical_flow::OpticalFlowImpl>(
+        of_params_, width, height, channels, image_type, device_id, stream);
+      flow->Init(of_params_);
+      optical_flow_ = std::move(flow);
+    }
   }
 
   /**
@@ -216,7 +205,6 @@ class OpticalFlow : public StatelessOperator<Backend> {
   const int hint_grid_size_;
   const bool enable_temporal_hints_;
   const bool enable_external_hints_;
-  std::once_flag of_initialized_;
   optical_flow::OpticalFlowParams of_params_;
   std::unique_ptr<optical_flow::OpticalFlowAdapter<ComputeBackend>> optical_flow_;
   DALIImageType image_type_;
@@ -226,6 +214,10 @@ class OpticalFlow : public StatelessOperator<Backend> {
   std::vector<int> sequence_sizes_;
   std::vector<DimsOrder> processing_order_;
   CUDAEvent sync_;
+
+#if NVML_ENABLED
+  nvml::NvmlInstance nvml_handle_;
+#endif
 };
 
 }  // namespace dali

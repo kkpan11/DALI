@@ -1,4 +1,4 @@
-// Copyright (c) 2021-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2021-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -24,6 +24,8 @@
 #include "dali/core/error_handling.h"
 #include "dali/operators/reader/loader/webdataset/tar_utils.h"
 #include "dali/pipeline/data/types.h"
+#include "dali/util/uri.h"
+#include "dali/core/call_once.h"
 
 namespace dali {
 
@@ -314,11 +316,12 @@ void WebdatasetLoader::ReadSample(vector<Tensor<CPUBackend>>& sample) {
       continue;
     }
     // Reading Data
-    if (copy_read_data_) {
+    if (copy_read_data_ || !current_wds_shard->CanMemoryMap()) {
       uint8_t* shared_tensor_data = nullptr;
       bool shared_tensor_is_pinned = false;
       int device_id = CPU_ONLY_DEVICE_ID;
       for (auto& output : component.outputs) {
+        sample[output].SetMeta(meta);
         if (!shared_tensor_data) {
           if (sample[output].shares_data()) {
             sample[output].Reset();
@@ -377,10 +380,17 @@ void WebdatasetLoader::PrepareMetadataImpl() {
     DALI_WARN("Index file not provided, it may take some time to infer it from the tar file");
   }
 
+  FileStream::Options opts;
+  opts.read_ahead = read_ahead_;
+  opts.use_mmap = !copy_read_data_;
+  opts.use_odirect = false;
+
   // initializing all the readers
   wds_shards_.reserve(paths_.size());
-  for (auto& uri : paths_) {
-    wds_shards_.emplace_back(FileStream::Open(uri, read_ahead_, !copy_read_data_));
+  for (auto& path : paths_) {
+    // If an actual URI, disable mmap
+    opts.use_mmap = !copy_read_data_;
+    wds_shards_.emplace_back(FileStream::Open(path, opts));
   }
 
   // preparing the map from extensions to outputs
@@ -438,7 +448,7 @@ void WebdatasetLoader::PrepareMetadataImpl() {
             component.outputs.num++;
             was_output_set[output] = true;
           } else {
-            std::call_once(multiple_files_single_component, [&]() {
+            dali::call_once(multiple_files_single_component, [&]() {
               DALI_WARN(make_string("Multiple components matching output ", output, " at ",
                                     GetSampleSource(new_sample), "."));
             });

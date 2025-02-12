@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -48,6 +48,14 @@ import tree
 
 def _data_node_repr(data_node):
     return f"DataNode(name={data_node.name}, device={data_node.device}, source={data_node.source})"
+
+
+def _map_structure(func, *structures, **kwargs):
+    """Custom wrapper over tree.map_structure that filters it out from the user-visible stack trace
+    for error reporting purposes.
+    """
+    with _autograph.CustomModuleFilter(tree):
+        return tree.map_structure(func, *structures, **kwargs)
 
 
 class _Branch(Enum):
@@ -309,7 +317,7 @@ class _ConditionStack:
             return
         logging.log(8, (f"{self._indent()}[IF/Register] {data_nodes} at {self.stack_depth() -1}"))
         scope = self._stack[0] if global_scope else self.top()
-        tree.map_structure(lambda node: scope.add_produced(node), data_nodes)
+        _map_structure(lambda node: scope.add_produced(node), data_nodes)
 
     def track_true_branch(self):
         """Mark `if` (true) branch as current scope."""
@@ -501,7 +509,7 @@ def apply_conditional_split_to_branch_outputs(branch_outputs, promote_constants=
             return apply_conditional_split(constant_node)
         return atom
 
-    return tree.map_structure(apply_split, branch_outputs)
+    return _map_structure(apply_split, branch_outputs)
 
 
 def apply_conditional_split_to_args(inputs, kwargs):
@@ -531,6 +539,19 @@ def _verify_branch_outputs(outputs, symbol_names, branch_name):
                 f"{common_explanation} The `{branch_name}` branch must also have"
                 f" a return statement."
             )
+
+
+def _validate_logical(value, expression_name, expression_side):
+    v = fn._conditional.validate_logical(
+        value, expression_name=expression_name, expression_side=expression_side
+    )
+    if v.device != "cpu":
+        raise RuntimeError(
+            f"Logical expression `{value}` is restricted to scalar (0-d tensors)"
+            f" inputs of `bool` type, that are placed on CPU."
+            f" Got a GPU input as the {expression_side} argument in logical expression."
+        )
+    return v
 
 
 class DaliOperatorOverload(_autograph.OperatorBase):
@@ -612,7 +633,7 @@ class DaliOperatorOverload(_autograph.OperatorBase):
                         new_body_val, new_orelse_val, predicate=split_predicate
                     )
 
-                output_values = tree.map_structure(merge_branches, body_outputs, orelse_outputs)
+                output_values = _map_structure(merge_branches, body_outputs, orelse_outputs)
 
         # Register the new nodes outside of the conditional scope, they will be used in subsequent
         # calls.
@@ -639,13 +660,11 @@ class DaliOperatorOverload(_autograph.OperatorBase):
         #   and_output = b()
         # else:
         #   and_output = a_val
-        a_validated = fn._conditional.validate_logical(
-            a_value, expression_name="and", expression_side="left"
-        )
+        a_validated = _validate_logical(a_value, expression_name="and", expression_side="left")
         with _cond_manager(a_validated) as split_predicate:
             with _cond_true():
                 b_value = b()
-                b_validated = fn._conditional.validate_logical(
+                b_validated = _validate_logical(
                     b_value, expression_name="and", expression_side="right"
                 )
                 body_outputs = apply_conditional_split(b_validated)
@@ -668,15 +687,14 @@ class DaliOperatorOverload(_autograph.OperatorBase):
         #   or_output = a_val
         # else:
         #   or_output = b()
-        a_validated = fn._conditional.validate_logical(
-            a_value, expression_name="or", expression_side="left"
-        )
+        a_validated = _validate_logical(a_value, expression_name="or", expression_side="left")
+
         with _cond_manager(a_validated) as split_predicate:
             with _cond_true():
                 body_outputs = apply_conditional_split(split_predicate)
             with _cond_false():
                 b_value = b()
-                b_validated = fn._conditional.validate_logical(
+                b_validated = _validate_logical(
                     b_value, expression_name="or", expression_side="right"
                 )
                 else_outputs = apply_conditional_split(b_validated)

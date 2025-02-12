@@ -1,4 +1,4 @@
-# Copyright (c) 2020-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2020-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ import math
 import logging
 import numpy as np
 import warnings
+import pickle  # nosec B403
 from enum import Enum, unique
 from collections.abc import Iterable
 
@@ -88,11 +89,11 @@ class _DaliBaseIterator(object):
                 * ``"no"``, ``False`` or ``None`` - at the end of epoch StopIteration is raised and
                   reset() needs to be called. Calling ``iter()`` on the iterator would reset
                   it as well.
-                * ``"yes"`` or ``"True"``- at the end of epoch StopIteration is raised but reset()
+                * ``"yes"`` or ``True``- at the end of epoch StopIteration is raised but reset()
                   is called internally automatically
 
     fill_last_batch : bool, optional, default = None
-                **Deprecated** Please use ``last_batch_policy`` instead
+                **Deprecated** Please use `last_batch_policy` instead
 
                 Whether to fill the last batch with data up to 'self.batch_size'.
                 The iterator would return the first integer multiple
@@ -104,7 +105,7 @@ class _DaliBaseIterator(object):
                 to fully fill it. See :meth:`nvidia.dali.plugin.base_iterator.LastBatchPolicy`
     last_batch_padded : bool, optional, default = False
                 Whether the last batch provided by DALI is padded with the last sample
-                or it just wraps up. In the conjunction with ``last_batch_policy`` it tells
+                or it just wraps up. In the conjunction with `last_batch_policy` it tells
                 if the iterator returning last batch with data only partially filled with
                 data from the current epoch is dropping padding samples or samples from
                 the next epoch. If set to False next
@@ -162,9 +163,9 @@ class _DaliBaseIterator(object):
         ), "All pipelines should have the same batch size set"
 
         self._size = int(size)
-        if not auto_reset or auto_reset is None or auto_reset == "no":
+        if auto_reset is False or auto_reset is None or auto_reset == "no":
             self._auto_reset = "no"
-        elif auto_reset or auto_reset == "yes":
+        elif auto_reset is True or auto_reset == "yes":
             self._auto_reset = "yes"
         else:
             raise ValueError(f"Unsupported value for `auto_reset` {auto_reset}")
@@ -226,18 +227,62 @@ class _DaliBaseIterator(object):
                 )
 
         if self._enable_checkpointing:
-            # Note: currently, checkpointing is not supported with last_batch_padded=False.
-            # It is verified in FileReader, where this assumption is needed.
-            # Adding this assertion here lead to problem when reader was not used in the pipeline.
-
-            if self._last_batch_policy == LastBatchPolicy.DROP:
-                raise NotImplementedError(
-                    "Currently, checkpointing is not supported with last_batch_policy=DROP"
-                )
+            if any(p.is_restored_from_checkpoint for p in self._pipes):
+                all_iterator_data = [p._iterator_data for p in self._pipes]
+                if not all(p.is_restored_from_checkpoint for p in self._pipes):
+                    logging.warning(
+                        "Some, but not all of the pipelines used were restored from checkpoint. "
+                        + "This iterator might produce unexpected results."
+                    )
+                elif not all(data == all_iterator_data[0] for data in all_iterator_data):
+                    logging.warning(
+                        "The provided pipelines had different iterator data in the checkpoints "
+                        + "they were restored from. "
+                        + "This iterator might produce unexpected results."
+                    )
+                iterator_data = all_iterator_data[0]
+                self._restore_state(iterator_data)
 
             # Precompute the initial checkpoints, to prevent any problems
             # related to the `prepare_first_batch` flag.
-            self._initial_checkpoints = [p.checkpoint() for p in self._pipes]
+            self._initial_checkpoints = [
+                p._get_checkpoint(iterator_data=self._save_state()) for p in self._pipes
+            ]
+
+    def _checkpointed_fields(self):
+        return [
+            "_counter",
+            "_counter_per_gpu",
+            "_shard_sizes_per_gpu",
+            "_shards_id",
+            "_size",
+        ]
+
+    def _restore_state(self, iterator_data):
+        """
+        Restores state of the iterator based on serialized `iterator_data`
+        """
+        if not iterator_data:
+            logging.warning(
+                "Iterator data was not saved in the checkpoint. "
+                "This iterator might produce unexpected results."
+            )
+            return
+
+        iterator_data = pickle.loads(iterator_data)  # nosec B301
+        for field in self._checkpointed_fields():
+            if hasattr(self, field):
+                setattr(self, field, iterator_data[field])
+
+    def _save_state(self):
+        iterator_data = pickle.dumps(
+            {
+                field: getattr(self, field)
+                for field in self._checkpointed_fields()
+                if hasattr(self, field)
+            }
+        )
+        return iterator_data
 
     def _calculate_shard_sizes(self, shard_nums):
         shards_beg = np.floor(shard_nums * self._size_no_pad / self._shards_num)
@@ -400,17 +445,32 @@ class _DaliBaseIterator(object):
 
         return should_end
 
+    def _report_no_data_in_pipeline(self):
+        """
+        Handles "no data in the pipeline" condition. If it's unexpected, raises an error.
+        """
+
+        # This might not be an error if we're iterating over pipeline that is
+        # currently at the end of epoch, for example because it was restored from
+        # checkpoint.
+        if all(not p.is_restored_from_checkpoint or p._first_iter for p in self._pipes):
+            raise RuntimeError(
+                "It seems that there is no data in the pipeline. This may happen "
+                "if `last_batch_policy` is set to PARTIAL and the requested batch size is "
+                "greater than the shard size."
+            )
+
     def checkpoints(self):
         """
         Returns the current checkpoints of the pipelines.
-        Can only be called between the epochs (or before the first epoch).
         """
         if not self._enable_checkpointing:
             raise ValueError("Cannot access checkpoints with checkpointing disabled")
         if not self._ever_consumed:
             return self._initial_checkpoints
         else:
-            return [p.checkpoint() for p in self._pipes]
+            iterator_data = self._save_state()
+            return [p._get_checkpoint(iterator_data=iterator_data) for p in self._pipes]
 
     def reset(self):
         """

@@ -1,4 +1,4 @@
-# Copyright (c) 2017-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2017-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,15 +20,21 @@ from __future__ import annotations
 import sys
 
 from ._utils.hacks import not_iterable
+from ._utils import dali_trace as _dali_trace
 
 
 def _arithm_op(*args, **kwargs):
     import nvidia.dali.ops
 
+    if _dali_trace.is_tracing_enabled():
+        definition_frame_end = _dali_trace.get_stack_depth() - 2
+    else:
+        definition_frame_end = None
+
     # Fully circular imports don't work. We need to import _arithm_op late and
     # replace this trampoline function.
     setattr(sys.modules[__name__], "_arithm_op", nvidia.dali.ops._arithm_op)
-    return nvidia.dali.ops._arithm_op(*args, **kwargs)
+    return nvidia.dali.ops._arithm_op(*args, **kwargs, definition_frame_end=definition_frame_end)
 
 
 class _NewAxis:
@@ -67,23 +73,33 @@ class DataNode(object):
         self.source = source
 
     def __str__(self):
-        return f'DataNode(name="{self.name}", device="{self.device}")'
+        return f'DataNode(name="{self.name}", device="{self.device}, source="{self.source}")'
 
     __repr__ = __str__
+
+    def gpu(self) -> DataNode:
+        return self._to_backend("gpu")
+
+    def cpu(self) -> DataNode:
+        self._check_gpu2cpu()
+        return self._to_backend("cpu")
 
     # Note: Regardless of whether we want the cpu or gpu version
     # of a tensor, we keep the source argument the same so that
     # the pipeline can backtrack through the user-defined graph
-    def gpu(self) -> DataNode:
+    def _to_backend(self, backend) -> DataNode:
+        if self.device == backend:
+            return self
+
         from nvidia.dali import _conditionals
 
         if _conditionals.conditionals_enabled():
             # Treat it the same way as regular operator would behave
             [self_split], _ = _conditionals.apply_conditional_split_to_args([self], {})
-            transferred_node = DataNode(self_split.name, "gpu", self_split.source)
+            transferred_node = DataNode(self_split.name, backend, self_split.source)
             _conditionals.register_data_nodes(transferred_node, [self])
             return transferred_node
-        return DataNode(self.name, "gpu", self.source)
+        return DataNode(self.name, backend, self.source)
 
     def __add__(self, other) -> DataNode:
         return _arithm_op("add", self, other)
@@ -243,6 +259,68 @@ class DataNode(object):
             return sliced
         else:
             return nvidia.dali.fn.expand_dims(sliced, axes=new_axes, new_axis_names=new_axis_names)
+
+    def shape(self, *, dtype=None, device="cpu"):
+        """Returns the run-time shapes of this DataNode as a new DataNode
+
+        Parameters
+        ----------
+        arg_dtype : DALIDataType, optional
+            If specified, the shape will be converted to this data type; defaults to INT64.
+        device : str, optional
+            The device ("cpu" or "gpu") where the result is returned; defaults to CPU.
+        """
+        from . import fn
+
+        if device == "cpu":
+            self._check_gpu2cpu()
+        return fn._shape(self, dtype=dtype, device=device)
+
+    def property(self, key, *, device="cpu"):
+        """Returns a metadata property associated with a DataNode
+
+        Parameters
+        ----------
+        key : str
+            The name of the metadata item. Currently supported:
+            "source_info"   - the file name or location in the dataset where the data originated
+                              (each sample is a 1D uint8 tensor)
+            "layout"        - the layout string
+                              (each sample is a 1D uint8 tensor)
+        device : str, optional
+            The device, where the value is returned; defaults to CPU.
+        """
+
+        from . import fn
+
+        if device == "cpu":
+            self._check_gpu2cpu()
+
+        return fn.get_property(self, key=key, device=device)
+
+    def source_info(self, *, device="cpu"):
+        """Returns the "source_info" property. Equivalent to self.meta("source_info")."""
+        return self.property("source_info", device=device)
+
+    def _check_gpu2cpu(self):
+        """Checks whether using this `DataNode` in a CPU operator is legal.
+
+        The function checks whether it's legal to pass it as an input to a CPU operator.
+        If the node is a result of a GPU operator which belongs to a pipeline with non-dynamic
+        executor, an error is raised.
+
+        .. note::
+        If the defining operator does not yet belong to any pipeline, the error is not raised and
+        the check is deferred until `Pipeline.build`.
+        """
+        if self.device == "gpu" and self.source and self.source.pipeline:
+            if not self.source.pipeline.exec_dynamic:
+                raise RuntimeError(
+                    "This pipeline doesn't support transition from GPU to CPU.\n"
+                    'To enable GPU->CPU transitions, use the experimental "dynamic" executor.\n'
+                    "Specify exec_dynamic=True in your Pipeline constructor or "
+                    "@pipeline_def."
+                )
 
 
 not_iterable(DataNode)

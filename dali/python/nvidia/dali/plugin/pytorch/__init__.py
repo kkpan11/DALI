@@ -1,4 +1,4 @@
-# Copyright (c) 2017-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2017-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,12 +15,11 @@
 import sys
 
 from typing import Union, Optional
-from typing import Any, Dict, List
+from typing import Dict, List
 
 from nvidia.dali import internal as _internal
 from nvidia.dali import ops
-from nvidia.dali import types
-from nvidia.dali.backend import TensorCPU, TensorGPU, TensorListCPU, TensorListGPU
+from nvidia.dali.backend import TensorCPU, TensorGPU, TensorListGPU
 from nvidia.dali.pipeline import Pipeline
 
 from nvidia.dali.plugin.base_iterator import _DaliBaseIterator
@@ -28,73 +27,17 @@ from nvidia.dali.plugin.base_iterator import LastBatchPolicy
 
 import torch
 import torch.utils.dlpack as torch_dlpack  # noqa: F401
-import ctypes
 import numpy as np
 
 from . import fn  # noqa: F401
+from . import experimental  # noqa: F401
 
+from nvidia.dali.plugin.pytorch.torch_utils import to_torch_type, feed_ndarray
 from nvidia.dali.plugin.pytorch._torch_function import TorchPythonFunction as TorchPythonFunction
 
 _internal._adjust_operator_module(TorchPythonFunction, sys.modules[__name__], [])
 
 ops._wrap_op(TorchPythonFunction, "fn", __name__)
-
-
-to_torch_type = {
-    types.DALIDataType.FLOAT: torch.float32,
-    types.DALIDataType.FLOAT64: torch.float64,
-    types.DALIDataType.FLOAT16: torch.float16,
-    types.DALIDataType.UINT8: torch.uint8,
-    types.DALIDataType.INT8: torch.int8,
-    types.DALIDataType.BOOL: torch.bool,
-    types.DALIDataType.INT16: torch.int16,
-    types.DALIDataType.INT32: torch.int32,
-    types.DALIDataType.INT64: torch.int64,
-}
-
-
-def feed_ndarray(
-    dali_tensor: Union[TensorCPU, TensorGPU, TensorListCPU, TensorListGPU],
-    arr: torch.Tensor,
-    cuda_stream: Union[torch.cuda.Stream, Any, None] = None,
-) -> torch.Tensor:
-    """
-    Copy contents of DALI tensor to PyTorch's Tensor.
-
-    Parameters
-    ----------
-    `dali_tensor` : nvidia.dali.backend.TensorCPU or nvidia.dali.backend.TensorGPU
-                    Tensor from which to copy
-    `arr` : torch.Tensor
-            Destination of the copy
-    `cuda_stream` : torch.cuda.Stream, cudaStream_t or any value that can be cast to cudaStream_t.
-                    CUDA stream to be used for the copy
-                    (if not provided, an internal user stream will be selected)
-                    In most cases, using pytorch's current stream is expected (for example,
-                    if we are copying to a tensor allocated with torch.zeros(...))
-    """
-    dali_type = to_torch_type[dali_tensor.dtype]
-
-    assert dali_type == arr.dtype, (
-        "The element type of DALI Tensor/TensorList"
-        " doesn't match the element type of the target PyTorch Tensor: "
-        "{} vs {}".format(dali_type, arr.dtype)
-    )
-    assert dali_tensor.shape() == list(
-        arr.size()
-    ), "Shapes do not match: DALI tensor has size {0}, but PyTorch Tensor has size {1}".format(
-        dali_tensor.shape(), list(arr.size())
-    )
-    cuda_stream = types._raw_cuda_stream(cuda_stream)
-
-    # turn raw int to a c void pointer
-    c_type_pointer = ctypes.c_void_p(arr.data_ptr())
-    if isinstance(dali_tensor, (TensorGPU, TensorListGPU)):
-        stream = None if cuda_stream is None else ctypes.c_void_p(cuda_stream)
-        dali_tensor.copy_to_external(c_type_pointer, stream, non_blocking=True)
-    else:
-        dali_tensor.copy_to_external(c_type_pointer)
-    return arr
 
 
 class DALIGenericIterator(_DaliBaseIterator):
@@ -139,7 +82,7 @@ class DALIGenericIterator(_DaliBaseIterator):
     dynamic_shape : any, optional,
                 Parameter used only for backward compatibility.
     fill_last_batch : bool, optional, default = None
-                **Deprecated** Please use ``last_batch_policy`` instead
+                **Deprecated** Please use `last_batch_policy` instead
 
                 Whether to fill the last batch with data up to 'self.batch_size'.
                 The iterator would return the first integer multiple
@@ -151,7 +94,7 @@ class DALIGenericIterator(_DaliBaseIterator):
                 to fully fill it. See :meth:`nvidia.dali.plugin.base_iterator.LastBatchPolicy`
     last_batch_padded : bool, optional, default = False
                 Whether the last batch provided by DALI is padded with the last sample
-                or it just wraps up. In the conjunction with ``last_batch_policy`` it tells
+                or it just wraps up. In the conjunction with `last_batch_policy` it tells
                 if the iterator returning last batch with data only partially filled with
                 data from the current epoch is dropping padding samples or samples from
                 the next epoch. If set to ``False`` next
@@ -224,15 +167,7 @@ class DALIGenericIterator(_DaliBaseIterator):
                 # here we should set if to False again
                 self._ever_consumed = False
             except StopIteration:
-                # This case might not be an error if we're iterating over pipeline that is
-                # currently at the end of epoch, for example because it was restored from
-                # checkpoint.
-                if all(not p.is_restored_from_checkpoint or p._first_iter for p in self._pipes):
-                    raise RuntimeError(
-                        "It seems that there is no data in the pipeline. This may happen "
-                        "if `last_batch_policy` is set to PARTIAL and the requested batch size is "
-                        "greater than the shard size."
-                    )
+                self._report_no_data_in_pipeline()
 
     def __next__(self) -> List[Dict[str, torch.Tensor]]:
         self._ever_consumed = True
@@ -247,6 +182,7 @@ class DALIGenericIterator(_DaliBaseIterator):
         data_batches = [None for i in range(self._num_gpus)]
         for i in range(self._num_gpus):
             dev_id = self._pipes[i].device_id
+            is_exec_dynamic = self._pipes[i].exec_dynamic
             # initialize dict for all output categories
             category_outputs = dict()
             # segregate outputs into categories
@@ -275,23 +211,36 @@ class DALIGenericIterator(_DaliBaseIterator):
                     category_device[category] = torch_cpu_device
 
             pyt_tensors = dict()
-            for category in self._output_categories:
-                pyt_tensors[category] = torch.empty(
-                    category_shapes[category],
-                    dtype=category_torch_type[category],
-                    device=category_device[category],
-                )
+
+            copy = not is_exec_dynamic
+            if copy:
+                # Copy data from DALI Tensors to torch tensors
+                for category, tensor in category_tensors.items():
+                    pyt_tensor = torch.empty(
+                        category_shapes[category],
+                        dtype=category_torch_type[category],
+                        device=category_device[category],
+                    )
+                    pyt_tensors[category] = pyt_tensor
+
+                    if isinstance(tensor, TensorGPU):
+                        # Using same cuda_stream used by torch.zeros to set the memory
+                        stream = torch.cuda.current_stream(device=pyt_tensors[category].device)
+                        feed_ndarray(tensor, pyt_tensor, cuda_stream=stream)
+                    elif isinstance(tensor, TensorCPU):
+                        feed_ndarray(tensor, pyt_tensor)
+                    else:
+                        raise RuntimeError(
+                            f"Internal error: unexpected type {type(tensor)}.\n"
+                            f"Expected TensorCPU or TensorGPU"
+                        )
+            else:
+                for category, tensor in category_tensors.items():
+                    with category_device[category]:
+                        pyt_tensor = torch.from_dlpack(tensor)
+                        pyt_tensors[category] = pyt_tensor
 
             data_batches[i] = pyt_tensors
-
-            # Copy data from DALI Tensors to torch tensors
-            for category, tensor in category_tensors.items():
-                if isinstance(tensor, (TensorGPU, TensorListGPU)):
-                    # Using same cuda_stream used by torch.zeros to set the memory
-                    stream = torch.cuda.current_stream(device=pyt_tensors[category].device)
-                    feed_ndarray(tensor, pyt_tensors[category], cuda_stream=stream)
-                else:
-                    feed_ndarray(tensor, pyt_tensors[category])
 
         self._schedule_runs()
 
@@ -385,7 +334,7 @@ class DALIClassificationIterator(DALIGenericIterator):
     dynamic_shape : any, optional,
                 Parameter used only for backward compatibility.
     fill_last_batch : bool, optional, default = None
-                **Deprecated** Please use ``last_batch_policy`` instead
+                **Deprecated** Please use `last_batch_policy` instead
 
                 Whether to fill the last batch with data up to 'self.batch_size'.
                 The iterator would return the first integer multiple
@@ -397,7 +346,7 @@ class DALIClassificationIterator(DALIGenericIterator):
                 to fully fill it. See :meth:`nvidia.dali.plugin.base_iterator.LastBatchPolicy`
     last_batch_padded : bool, optional, default = False
                 Whether the last batch provided by DALI is padded with the last sample
-                or it just wraps up. In the conjunction with ``last_batch_policy`` it tells
+                or it just wraps up. In the conjunction with `last_batch_policy` it tells
                 if the iterator returning last batch with data only partially filled with
                 data from the current epoch is dropping padding samples or samples from
                 the next epoch. If set to ``False`` next
@@ -512,7 +461,7 @@ class DALIRaggedIterator(_DaliBaseIterator):
                   is called internally automatically
 
     fill_last_batch : bool, optional, default = None
-                **Deprecated** Please use ``last_batch_policy`` instead
+                **Deprecated** Please use `last_batch_policy` instead
 
                 Whether to fill the last batch with data up to 'self.batch_size'.
                 The iterator would return the first integer multiple
@@ -524,7 +473,7 @@ class DALIRaggedIterator(_DaliBaseIterator):
                 to fully fill it. See :meth:`nvidia.dali.plugin.base_iterator.LastBatchPolicy`
     last_batch_padded : bool, optional, default = False
                 Whether the last batch provided by DALI is padded with the last sample
-                or it just wraps up. In the conjunction with ``last_batch_policy`` it tells
+                or it just wraps up. In the conjunction with `last_batch_policy` it tells
                 if the iterator returning last batch with data only partially filled with
                 data from the current epoch is dropping padding samples or samples from
                 the next epoch (it doesn't literally drop but sets ``pad`` field of ndarray
@@ -608,15 +557,7 @@ class DALIRaggedIterator(_DaliBaseIterator):
                 # here we should set if to False again
                 self._ever_consumed = False
             except StopIteration:
-                # This case might not be an error if we're iterating over pipeline that is
-                # currently at the end of epoch, for example because it was restored from
-                # checkpoint.
-                if all(not p.is_restored_from_checkpoint or p._first_iter for p in self._pipes):
-                    raise RuntimeError(
-                        "It seems that there is no data in the pipeline. This may happen "
-                        "if `last_batch_policy` is set to PARTIAL and the requested batch size is "
-                        "greater than the shard size."
-                    )
+                self._report_no_data_in_pipeline()
 
     def __next__(self) -> List[Dict[str, torch.Tensor]]:
         self._ever_consumed = True
@@ -631,6 +572,7 @@ class DALIRaggedIterator(_DaliBaseIterator):
         data_batches = [None for i in range(self._num_gpus)]
         for i in range(self._num_gpus):
             dev_id = self._pipes[i].device_id
+            is_exec_dynamic = self._pipes[i].exec_dynamic
             # initialize dict for all output categories
             category_outputs = dict()
             # segregate outputs into categories
@@ -667,65 +609,87 @@ class DALIRaggedIterator(_DaliBaseIterator):
                 else:
                     category_device[category] = torch_cpu_device
 
+            copy = not is_exec_dynamic
+
             pyt_tensors = dict()
-            for j, category in enumerate(self.output_map):
-                if (
-                    self._outputs_types is None
-                    or self._outputs_types[j] == DALIRaggedIterator.DENSE_TAG
-                ):
-                    pyt_tensors[category] = torch.empty(
-                        category_shapes[category],
-                        dtype=category_torch_type[category],
-                        device=category_device[category],
-                    )
-                else:
-                    pyt_tensors[category] = [
-                        torch.empty(
-                            shape,
+            if copy:
+                for j, category in enumerate(self.output_map):
+                    if (
+                        self._outputs_types is None
+                        or self._outputs_types[j] == DALIRaggedIterator.DENSE_TAG
+                    ):
+                        pyt_tensors[category] = torch.empty(
+                            category_shapes[category],
                             dtype=category_torch_type[category],
                             device=category_device[category],
                         )
-                        for shape in category_shapes[category]
-                    ]
-
-            data_batches[i] = pyt_tensors
-
-            # Copy data from DALI Tensors to torch tensors
-            for j, (category, tensor) in enumerate(category_tensors.items()):
-                if (
-                    self._outputs_types is None
-                    or self._outputs_types[j] == DALIRaggedIterator.DENSE_TAG
-                ):
-                    if isinstance(tensor, (TensorGPU, TensorListGPU)):
-                        # Using same cuda_stream used by torch.zeros to set the memory
-                        stream = torch.cuda.current_stream(device=pyt_tensors[category].device)
-                        feed_ndarray(tensor, pyt_tensors[category], cuda_stream=stream)
                     else:
-                        feed_ndarray(tensor, pyt_tensors[category])
-                else:
-                    for k, single_tensor in enumerate(tensor):
+                        pyt_tensors[category] = [
+                            torch.empty(
+                                shape,
+                                dtype=category_torch_type[category],
+                                device=category_device[category],
+                            )
+                            for shape in category_shapes[category]
+                        ]
+
+                # Copy data from DALI Tensors to torch tensors
+                for j, (category, tensor) in enumerate(category_tensors.items()):
+                    if (
+                        self._outputs_types is None
+                        or self._outputs_types[j] == DALIRaggedIterator.DENSE_TAG
+                    ):
                         if isinstance(tensor, (TensorGPU, TensorListGPU)):
                             # Using same cuda_stream used by torch.zeros to set the memory
-                            stream = torch.cuda.current_stream(
-                                device=pyt_tensors[category][k].device
-                            )
-                            feed_ndarray(
-                                single_tensor, pyt_tensors[category][k], cuda_stream=stream
-                            )
+                            stream = torch.cuda.current_stream(device=pyt_tensors[category].device)
+                            feed_ndarray(tensor, pyt_tensors[category], cuda_stream=stream)
                         else:
-                            feed_ndarray(single_tensor, pyt_tensors[category][k])
+                            feed_ndarray(tensor, pyt_tensors[category])
+                    else:
+                        for k, single_tensor in enumerate(tensor):
+                            if isinstance(tensor, (TensorGPU, TensorListGPU)):
+                                # Using same cuda_stream used by torch.zeros to set the memory
+                                stream = torch.cuda.current_stream(
+                                    device=pyt_tensors[category][k].device
+                                )
+                                feed_ndarray(
+                                    single_tensor, pyt_tensors[category][k], cuda_stream=stream
+                                )
+                            else:
+                                feed_ndarray(single_tensor, pyt_tensors[category][k])
 
-                    if self._outputs_types[j] == DALIRaggedIterator.SPARSE_COO_TAG:
-                        values = torch.hstack(pyt_tensors[category])
+                        if self._outputs_types[j] == DALIRaggedIterator.SPARSE_COO_TAG:
+                            values = torch.hstack(pyt_tensors[category])
 
-                        indices = [
-                            [(i, j) for j in range(shape[0])]
-                            for i, shape in enumerate(category_shapes[category])
-                        ]
-                        indices = [indice for el_indices in indices for indice in el_indices]
-                        indices = torch.LongTensor(indices, device=values.device)
+                            indices = [
+                                [(i, j) for j in range(shape[0])]
+                                for i, shape in enumerate(category_shapes[category])
+                            ]
+                            indices = [index for el_indices in indices for index in el_indices]
+                            indices = torch.LongTensor(indices, device=values.device)
 
-                        pyt_tensors[category] = torch.sparse_coo_tensor(indices.T, values)
+                            pyt_tensors[category] = torch.sparse_coo_tensor(indices.T, values)
+            else:
+                for j, (category, tensor_or_tl) in enumerate(category_tensors.items()):
+                    with category_device[category]:
+                        if isinstance(tensor_or_tl, list):
+                            pyt_tl = [torch.from_dlpack(t) for t in tensor_or_tl]
+                            if self._outputs_types[j] == DALIRaggedIterator.SPARSE_COO_TAG:
+                                values = torch.hstack(pyt_tl)
+                                indices = [
+                                    [(i, j) for j in range(shape[0])]
+                                    for i, shape in enumerate(category_shapes[category])
+                                ]
+                                indices = [index for el_indices in indices for index in el_indices]
+                                indices = torch.LongTensor(indices, device=values.device)
+
+                                pyt_tl = torch.sparse_coo_tensor(indices.T, values)
+
+                            pyt_tensors[category] = pyt_tl
+                        else:
+                            pyt_tensors[category] = torch.from_dlpack(tensor_or_tl)
+
+            data_batches[i] = pyt_tensors
 
         self._schedule_runs()
 

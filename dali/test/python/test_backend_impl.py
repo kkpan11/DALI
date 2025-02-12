@@ -1,4 +1,4 @@
-# Copyright (c) 2019-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2019-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -22,8 +22,7 @@ from nvidia.dali.backend_impl import TensorCPU, TensorListCPU, TensorListGPU
 from nvidia.dali.backend_impl import types as types_
 import nvidia.dali as dali
 
-from nose_utils import assert_raises
-from nose import SkipTest
+from nose_utils import assert_raises, SkipTest
 from test_utils import dali_type_to_np, py_buffer_from_address, get_device_memory_info
 
 
@@ -171,7 +170,7 @@ def test_array_interface_types():
         np.float32,
         np.float16,
         np.short,
-        np.long,
+        int,
         np.longlong,
         np.ushort,
         np.ulonglong,
@@ -330,7 +329,6 @@ def test_dtype_converion():
     np_types = list(map(dali_type_to_np, dali_types))
     for dali_type, np_type in zip(dali_types, np_types):
         pipe = dtype_pipeline(np_type, dali_type)
-        pipe.build()
         assert pipe.run()[0].dtype == dali_type
 
 
@@ -392,7 +390,7 @@ def test_tensor_str_sample():
     _test_str(t, params, _expected_tensor_str)
 
 
-def test_tensor_expose_dlpack_capsule():
+def test_tensor_dlpack_export():
     # TODO(awolant): Numpy versions for Python 3.6 and 3.7 do not
     # support from_dlpack. When we upgrade DLPack support for DALI
     # this test needs to be changed.
@@ -402,18 +400,6 @@ def test_tensor_expose_dlpack_capsule():
     arr = np.arange(20)
     tensor = TensorCPU(arr, "NHWC")
 
-    capsule = tensor._expose_dlpack_capsule()
-
-    # TODO(awolant): This adapter is required due to various implementations
-    # for DLPack interface. When we extend DLPack export support this should
-    # be removed.
-    class dlpack_interface_adapter:
-        def __init__(self, capsule):
-            self.capsule = capsule
-
-        def __dlpack__(self):
-            return self.capsule
-
-    arr_from_dlapck = np.from_dlpack(dlpack_interface_adapter(capsule))
+    arr_from_dlapck = np.from_dlpack(tensor)
 
     assert np.array_equal(arr, arr_from_dlapck)

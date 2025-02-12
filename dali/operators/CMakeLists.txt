@@ -1,4 +1,4 @@
-# Copyright (c) 2017-2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2017-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -23,6 +23,7 @@ add_subdirectory(generic)
 add_subdirectory(image)
 add_subdirectory(imgcodec)
 add_subdirectory(input)
+add_subdirectory(io)
 add_subdirectory(math)
 add_subdirectory(random)
 add_subdirectory(reader)
@@ -32,6 +33,9 @@ add_subdirectory(signal)
 add_subdirectory(ssd)
 add_subdirectory(util)
 add_subdirectory(numba_function)
+if (BUILD_CVCUDA)
+  add_subdirectory(nvcvop)
+endif()
 if (BUILD_PYTHON)
   add_subdirectory(python_function)
 endif()
@@ -86,17 +90,32 @@ adjust_source_file_language_property("${DALI_OPERATOR_SRCS}")
 add_library(dali_operators ${LIBTYPE} ${DALI_OPERATOR_SRCS} ${DALI_OPERATOR_OBJ})
 set_target_properties(dali_operators PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY "${DALI_LIBRARY_OUTPUT_DIR}")
-target_link_libraries(dali_operators PUBLIC dali dali_kernels dali_core dali_imgcodec)
+target_link_libraries(dali_operators PUBLIC dali dali_kernels dali_core)
 target_link_libraries(dali_operators PRIVATE dynlink_cuda ${DALI_LIBS})
 if (BUILD_NVML)
   target_link_libraries(dali_operators PRIVATE dynlink_nvml)
   target_link_libraries(dali_operators PRIVATE "-Wl,--exclude-libs,$<TARGET_FILE_NAME:dynlink_nvml>")
 endif(BUILD_NVML)
 
+if (BUILD_CVCUDA)
+  target_link_libraries(dali_operators PRIVATE cvcuda nvcv_types)
+endif(BUILD_CVCUDA)
+
 if (BUILD_NVJPEG AND WITH_DYNAMIC_NVJPEG)
   target_link_libraries(dali_operators PRIVATE dynlink_nvjpeg)
   target_link_libraries(dali_operators PRIVATE "-Wl,--exclude-libs,$<TARGET_FILE_NAME:dynlink_nvjpeg>")
 endif(BUILD_NVJPEG AND WITH_DYNAMIC_NVJPEG)
+
+if (BUILD_NVIMAGECODEC)
+  if (WITH_DYNAMIC_NVIMGCODEC)
+    target_link_libraries(dali_operators PRIVATE dynlink_nvimgcodec)
+    target_link_libraries(dali_operators PRIVATE "-Wl,--exclude-libs,$<TARGET_FILE_NAME:dynlink_nvimgcodec>")
+  else()
+    add_dependencies(dali_operators nvImageCodec)
+    message(STATUS "Linking dali_operators with nvImageCodec static libs: ${NVIMGCODEC_LIBS}")
+    target_link_libraries(dali_operators PRIVATE ${NVIMGCODEC_LIBS})
+  endif()
+endif()
 
 if (WITH_DYNAMIC_NPP)
   target_link_libraries(dali_operators PRIVATE dynlink_npp)

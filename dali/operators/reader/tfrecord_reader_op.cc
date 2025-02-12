@@ -38,6 +38,7 @@ DALI_REGISTER_OPERATOR(readers___TFRecord, TFRecordReader, CPU);
 // Common part of schema for internal readers._tfrecord and public readers.tfrecord schema.
 DALI_SCHEMA(readers___TFRecordBase)
   .DocStr(R"code(Read sample data from a TensorFlow TFRecord file.)code")
+  .AddRandomSeedArg()
   .AddArg("path",
       R"code(List of paths to TFRecord files.)code",
       DALI_STRING_VEC)
@@ -119,7 +120,7 @@ void TFRecordReader::Prefetch() {
   // We actually prepare the next batch
   DomainTimeRange tr("[DALI][TFRecordReader] Prefetch #" + to_string(curr_batch_producer_),
                      DomainTimeRange::kRed);
-  DataReader<CPUBackend, Tensor<CPUBackend>, Tensor<CPUBackend>, true>::Prefetch();
+  DataReader<CPUBackend, IndexedFileLoaderSample, Tensor<CPUBackend>, true>::Prefetch();
 
   auto idx_loader = dynamic_cast<IndexedFileLoader*>(loader_.get());
   while (idx_loader->AnyWorkLeft()) {

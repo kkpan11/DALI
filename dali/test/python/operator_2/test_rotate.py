@@ -1,4 +1,4 @@
-# Copyright (c) 2019-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2019-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -223,8 +223,6 @@ class CVPipeline(Pipeline):
 
 
 def compare(pipe1, pipe2, eps):
-    pipe1.build()
-    pipe2.build()
     epoch_size = pipe1.epoch_size("Reader")
     batch_size = pipe1.max_batch_size
     niter = 1 if batch_size >= epoch_size else 2
@@ -310,9 +308,9 @@ def sequence_batch_output_size(unfolded_extents, input_batch, angle_batch, axis_
         assert axis_batch is None or len(axis_batch) == len(angle_batch)
         offset = 0
         for group in unfolded_extents:
-            yield input_batch[offset : offset + group], angle_batch[
-                offset : offset + group
-            ], None if axis_batch is None else axis_batch[offset : offset + group]
+            yield input_batch[offset : offset + group], angle_batch[offset : offset + group], (
+                None if axis_batch is None else axis_batch[offset : offset + group]
+            )
             offset += group
 
     sequence_output_shape = [

@@ -1,4 +1,4 @@
-# Copyright (c) 2020-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2020-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -22,8 +22,7 @@ import os
 import platform
 import random
 import tempfile
-from nose_utils import assert_raises
-from nose import SkipTest
+from nose_utils import assert_raises, SkipTest
 from nose2.tools import params, cartesian_params
 from test_utils import compare_pipelines, to_array
 
@@ -150,7 +149,7 @@ all_numpy_types = set(
         np.float_,
         np.complex64,
         np.complex128,
-        np.complex_,
+        complex,
     ]
 )
 unsupported_numpy_types = set(
@@ -161,7 +160,7 @@ unsupported_numpy_types = set(
         np.complex64,
         np.complex128,
         np.longdouble,
-        np.complex_,
+        complex,
     ]
 )
 rng = np.random.RandomState(12345)
@@ -242,7 +241,6 @@ def _testimpl_types_and_shapes(
             enable_o_direct=enable_o_direct,
         )
         try:
-            pipe.build()
             i = 0
             while i < nsamples:
                 pipe_out = pipe.run()
@@ -308,7 +306,6 @@ def test_header_parse(use_o_direct):
 
         for ndim, path in zip(ndims, paths):
             p = pipeline(test_filename=path)
-            p.build()
             (out,) = p.run()
             shapes = out.shape()
             assert len(shapes) == 1, f"{len(shapes)}"
@@ -422,7 +419,6 @@ def check_dim_mismatch(device, test_data_root, names):
     pipe.set_outputs(fn.readers.numpy(device=device, file_root=test_data_root, files=names))
     err = None
     try:
-        pipe.build()
         pipe.run()
     except RuntimeError as thrown:
         err = thrown
@@ -449,7 +445,6 @@ def check_type_mismatch(device, test_data_root, names):
     pipe.set_outputs(fn.readers.numpy(device=device, file_root=test_data_root, files=names))
 
     try:
-        pipe.build()
         pipe.run()
     except RuntimeError as thrown:
         err = thrown
@@ -603,7 +598,6 @@ def _testimpl_numpy_reader_roi(
     )
 
     try:
-        pipe.build()
         roi_out, sliced_out = pipe.run()
         for i in range(batch_size):
             roi_arr = to_array(roi_out[i])
@@ -644,7 +638,6 @@ def _testimpl_numpy_reader_roi_empty_axes(
 
     p = pipe()
     try:
-        p.build()
         data0, data1 = p.run()
     finally:
         del p
@@ -685,7 +678,6 @@ def _testimpl_numpy_reader_roi_empty_range(
 
     p = pipe()
     try:
-        p.build()
         data0, data1 = p.run()
         for i in range(batch_size):
             arr = to_array(data0[i])
@@ -913,7 +905,6 @@ def _testimpl_numpy_reader_roi_error(
     p = pipe()
     err = None
     try:
-        p.build()
         p.run()
     except RuntimeError as thrown:
         err = thrown
@@ -1027,7 +1018,6 @@ def test_pad_last_sample(device, batch_description, dont_use_mmap, use_o_direct)
             dont_use_mmap=dont_use_mmap,
             enable_o_direct=use_o_direct,
         )
-        pipe.build()
 
         try:
             for _ in range(2):
@@ -1091,7 +1081,6 @@ def test_shuffling(shuffling, pad_last_batch):
             )
             pipe.set_outputs(data_cpu, data_gpu)
 
-        pipe.build()
         for _ in range(num_samples // batch_size * 2):
             (cpu_arr, gpu_arr) = pipe.run()
             assert_array_equal(to_array(cpu_arr), to_array(gpu_arr))

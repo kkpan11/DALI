@@ -1,4 +1,4 @@
-# Copyright (c) 2017-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2017-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -22,7 +22,12 @@ set(DALI_INST_HDRS ${DALI_INST_HDRS}
   "${CMAKE_CURRENT_SOURCE_DIR}/ocv.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/random_crop_generator.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/thread_safe_queue.h"
-  "${CMAKE_CURRENT_SOURCE_DIR}/user_stream.h")
+  "${CMAKE_CURRENT_SOURCE_DIR}/numpy.h"
+  "${CMAKE_CURRENT_SOURCE_DIR}/user_stream.h"
+  "${CMAKE_CURRENT_SOURCE_DIR}/uri.h"
+  "${CMAKE_CURRENT_SOURCE_DIR}/s3_file.h"
+  "${CMAKE_CURRENT_SOURCE_DIR}/s3_filesystem.h"
+  "${CMAKE_CURRENT_SOURCE_DIR}/s3_client_manager.h")
 
 set(DALI_SRCS ${DALI_SRCS}
   "${CMAKE_CURRENT_SOURCE_DIR}/file.cc"
@@ -33,7 +38,8 @@ set(DALI_SRCS ${DALI_SRCS}
   "${CMAKE_CURRENT_SOURCE_DIR}/ocv.cc"
   "${CMAKE_CURRENT_SOURCE_DIR}/random_crop_generator.cc"
   "${CMAKE_CURRENT_SOURCE_DIR}/user_stream.cc"
-  "${CMAKE_CURRENT_SOURCE_DIR}/numpy.cc")
+  "${CMAKE_CURRENT_SOURCE_DIR}/numpy.cc"
+  "${CMAKE_CURRENT_SOURCE_DIR}/uri.cc")
 
 if (BUILD_CUFILE)
   set(DALI_INST_HDRS ${DALI_INST_HDRS}
@@ -54,9 +60,17 @@ if (BUILD_CFITSIO)
   "${CMAKE_CURRENT_SOURCE_DIR}/fits_test.cc")
 endif()
 
+
+if (BUILD_AWSSDK)
+  set(DALI_SRCS ${DALI_SRCS}
+  "${CMAKE_CURRENT_SOURCE_DIR}/s3_file.cc"
+  "${CMAKE_CURRENT_SOURCE_DIR}/s3_filesystem.cc")
+endif()
+
 set(DALI_TEST_SRCS ${DALI_TEST_SRCS}
   "${CMAKE_CURRENT_SOURCE_DIR}/random_crop_generator_test.cc"
-  "${CMAKE_CURRENT_SOURCE_DIR}/numpy_test.cc")
+  "${CMAKE_CURRENT_SOURCE_DIR}/numpy_test.cc"
+  "${CMAKE_CURRENT_SOURCE_DIR}/uri_test.cc")
 
 # transform a list of paths into a list of include directives
 DETERMINE_GCC_SYSTEM_INCLUDE_DIRS("c++" "${CMAKE_CXX_COMPILER}" "${CMAKE_CXX_FLAGS}" INFERED_COMPILER_INCLUDE)
@@ -75,15 +89,15 @@ if(BUILD_NVML)
     set(NVML_GENERATED_STUB "${CMAKE_CURRENT_BINARY_DIR}/dynlink_nvml_gen.cc")
     add_custom_command(
         OUTPUT ${NVML_GENERATED_STUB}
-        COMMAND python ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/stub_generator/stub_codegen.py --unique_prefix=Nvml --
-                    "${CMAKE_CURRENT_SOURCE_DIR}/../../tools/stub_generator/nvml.json" ${NVML_GENERATED_STUB}
+        COMMAND python ${CMAKE_CURRENT_SOURCE_DIR}/../../internal_tools/stub_generator/stub_codegen.py --unique_prefix=Nvml --
+                    "${CMAKE_CURRENT_SOURCE_DIR}/../../internal_tools/stub_generator/nvml.json" ${NVML_GENERATED_STUB}
                     "${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}/nvml.h" "-I${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}"
                     # for some reason QNX fails with 'too many errors emitted' is this is not set
                     "-ferror-limit=0"
                     ${DEFAULT_COMPILER_INCLUDE}
-        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/stub_generator/stub_codegen.py
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/../../internal_tools/stub_generator/stub_codegen.py
                 "${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}/nvml.h"
-                "${CMAKE_CURRENT_SOURCE_DIR}/../../tools/stub_generator/nvml.json"
+                "${CMAKE_CURRENT_SOURCE_DIR}/../../internal_tools/stub_generator/nvml.json"
         COMMENT "Running nvml.h stub generator"
         VERBATIM)
 

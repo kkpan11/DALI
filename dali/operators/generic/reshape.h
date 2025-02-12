@@ -1,4 +1,4 @@
-// Copyright (c) 2019-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2019-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -32,9 +32,8 @@ class Reshape : public StatelessOperator<Backend> {
 
   explicit Reshape(const OpSpec &spec_);
 
-  bool CanInferOutputs() const override {
-    // Return false, because we specifically don't want the executor to allocate
-    // the storage for the output - even though we can infer the shape.
+  bool HasContiguousOutputs() const override {
+    // The contiguity depends on the source operator's output
     return false;
   }
 
@@ -63,10 +62,6 @@ class Reshape : public StatelessOperator<Backend> {
   TensorLayout layout_;
 
  private:
-  inline const std::string &OpName() const {
-    return this->spec_.name();
-  }
-
   TensorListShape<> input_shape_;
   TensorShape<> uniform_shape_;
   std::vector<float> rel_uniform_shape_;

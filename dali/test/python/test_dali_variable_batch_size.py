@@ -1,4 +1,4 @@
-# Copyright (c) 2020-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2020-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import inspect
-import nose
 import numpy as np
 import nvidia.dali.fn as fn
 import nvidia.dali.math as dmath
@@ -22,22 +21,20 @@ import os
 import random
 import re
 from functools import partial
-from nose.plugins.attrib import attr
-from nose.tools import nottest
+from nose_utils import SkipTest, attr, nottest
 from nvidia.dali.pipeline import Pipeline, pipeline_def
 from nvidia.dali.pipeline.experimental import pipeline_def as experimental_pipeline_def
-from nvidia.dali.plugin.numba.fn.experimental import numba_function
 
 import test_utils
 from segmentation_test_utils import make_batch_select_masks
 from test_detection_pipeline import coco_anchors
-from test_optical_flow import load_frames, is_of_supported
 from test_utils import (
     module_functions,
     has_operator,
     restrict_platform,
     check_numba_compatibility_cpu,
     check_numba_compatibility_gpu,
+    is_of_supported,
 )
 
 """
@@ -186,7 +183,6 @@ def run_pipeline(input_epoch, pipeline_fn, *, devices: list = ["cpu", "gpu"], **
         n_iter = len(input_epoch)
         max_bs = max(get_batch_size(batch) for batch in input_epoch)
         var_pipe = pipeline_fn(max_bs, input_epoch, device, **pipeline_fn_args)
-        var_pipe.build()
         for _ in range(n_iter):
             var_pipe.run()
 
@@ -215,14 +211,12 @@ def check_pipeline(
         n_iter = len(input_epoch)
         max_bs = max(get_batch_size(batch) for batch in input_epoch)
         var_pipe = pipeline_fn(max_bs, input_epoch, device, **pipeline_fn_args)
-        var_pipe.build()
 
         for iter_idx in range(n_iter):
             iter_input = input_epoch[iter_idx]
             batch_size = get_batch_size(iter_input)
 
             const_pipe = pipeline_fn(batch_size, [iter_input], device, **pipeline_fn_args)
-            const_pipe.build()
 
             test_utils.compare_pipelines(
                 var_pipe, const_pipe, batch_size=batch_size, N_iterations=1, eps=eps
@@ -372,37 +366,37 @@ ops_image_custom_args = [
     (fn.grid_mask, {"angle": 2.6810782, "ratio": 0.38158387, "tile": 51}),
     (fn.multi_paste, {"in_ids": np.zeros([31], dtype=np.int32), "output_size": [300, 300, 3]}),
     (fn.experimental.median_blur, {"devices": ["gpu"]}),
+    (fn.experimental.dilate, {"devices": ["gpu"]}),
+    (fn.experimental.erode, {"devices": ["gpu"]}),
+    (fn.experimental.warp_perspective, {"matrix": np.eye(3), "devices": ["gpu"]}),
+    (fn.experimental.resize, {"resize_x": 50, "resize_y": 50, "devices": ["gpu"]}),
+    (fn.zeros_like, {"devices": ["cpu"]}),
+    (fn.ones_like, {"devices": ["cpu"]}),
 ]
 
-if check_numba_compatibility_gpu(False):
-    ops_image_custom_args.append(
-        (
-            numba_function,
-            {
-                "batch_processing": True,
-                "devices": ["cpu"],
-                "in_types": [types.UINT8],
-                "ins_ndim": [3],
-                "out_types": [types.UINT8],
-                "outs_ndim": [3],
-                "run_fn": numba_set_all_values_to_255_batch,
-                "setup_fn": numba_setup_out_shape,
-            },
-        )
-    )
+numba_compatible_devices = []
 
+if check_numba_compatibility_gpu(False):
+    numba_compatible_devices.append("gpu")
 
 if check_numba_compatibility_cpu(False):
+    numba_compatible_devices.append("cpu")
+
+if len(numba_compatible_devices) > 0:
+    from nvidia.dali.plugin.numba.fn.experimental import numba_function
+
     ops_image_custom_args.append(
         (
             numba_function,
             {
                 "batch_processing": False,
-                "devices": ["cpu"],
+                "devices": numba_compatible_devices,
                 "in_types": [types.UINT8],
                 "ins_ndim": [3],
                 "out_types": [types.UINT8],
                 "outs_ndim": [3],
+                "blocks": [32, 32, 1],
+                "threads_per_block": [32, 16, 1],
                 "run_fn": numba_set_all_values_to_255_batch,
                 "setup_fn": numba_setup_out_shape,
             },
@@ -521,6 +515,17 @@ def test_uniform():
     run_pipeline(generate_data(31, 13, array_1d_shape_generator), pipeline_fn=pipe)
 
 
+def test_random_choice():
+    def pipe(max_batch_size, input_data, device):
+        pipe = Pipeline(batch_size=max_batch_size, num_threads=4, device_id=0)
+        data = fn.external_source(source=input_data, cycle=False, device=device)
+        dist = fn.random.choice(data)
+        pipe.set_outputs(dist)
+        return pipe
+
+    run_pipeline(generate_data(31, 13, array_1d_shape_generator), pipeline_fn=pipe, devices=["cpu"])
+
+
 def test_random_normal():
     def pipe_input(max_batch_size, input_data, device):
         pipe = Pipeline(batch_size=max_batch_size, num_threads=4, device_id=0)
@@ -538,6 +543,31 @@ def test_random_normal():
 
     run_pipeline(generate_data(31, 13, image_like_shape_generator), pipeline_fn=pipe_input)
     run_pipeline(generate_data(31, 13, image_like_shape_generator), pipeline_fn=pipe_no_input)
+
+
+def test_random_beta():
+    def pipe_input(max_batch_size, input_data, device):
+        pipe = Pipeline(batch_size=max_batch_size, num_threads=4, device_id=0)
+        data = fn.external_source(source=input_data, cycle=False, device=device)
+        dist = fn.random.beta(data)
+        pipe.set_outputs(dist)
+        return pipe
+
+    def pipe_no_input(max_batch_size, input_data, device):
+        pipe = Pipeline(batch_size=max_batch_size, num_threads=4, device_id=0)
+        data = fn.external_source(source=input_data, cycle=False, device=device)
+        dist = data + fn.random.beta()
+        pipe.set_outputs(dist)
+        return pipe
+
+    run_pipeline(
+        generate_data(31, 13, image_like_shape_generator), pipeline_fn=pipe_input, devices=["cpu"]
+    )
+    run_pipeline(
+        generate_data(31, 13, image_like_shape_generator),
+        pipeline_fn=pipe_no_input,
+        devices=["cpu"],
+    )
 
 
 def no_input_op_helper(operator_fn, opfn_args={}):
@@ -1222,7 +1252,7 @@ def test_segmentation_select_masks():
 
 def test_optical_flow():
     if not is_of_supported():
-        raise nose.SkipTest("Optical Flow is not supported on this platform")
+        raise SkipTest("Optical Flow is not supported on this platform")
 
     def pipe(max_batch_size, input_data, device, input_layout=None):
         pipe = Pipeline(batch_size=max_batch_size, num_threads=4, device_id=0)
@@ -1234,9 +1264,7 @@ def test_optical_flow():
         pipe.set_outputs(processed)
         return pipe
 
-    max_batch_size = 5
-    bach_sizes = [max_batch_size // 2, max_batch_size // 4, max_batch_size]
-    input_data = [[load_frames() for _ in range(bs)] for bs in bach_sizes]
+    input_data = generate_data(5, 2, (10, 480, 640, 3), lo=0, hi=255, dtype=np.uint8)
     check_pipeline(input_data, pipeline_fn=pipe, devices=["gpu"], input_layout="FHWC")
 
 
@@ -1283,7 +1311,6 @@ def test_crop_argument_from_external_source():
         return images
 
     pipe = pipeline()
-    pipe.build()
 
     image_data = np.fromfile(
         os.path.join(
@@ -1519,6 +1546,92 @@ def test_conditional():
     )
 
 
+def test_random_crop_gen():
+    def pipe(max_batch_size, input_data, device):
+        pipe = Pipeline(batch_size=max_batch_size, num_threads=4, device_id=0)
+        data = fn.external_source(source=input_data, cycle=False, device=device)
+        anchor, shape = fn.random_crop_generator(data)
+        pipe.set_outputs(anchor, shape)
+        return pipe
+
+    sh = (2,)
+    run_pipeline(generate_data(31, 13, sh, dtype=np.int64), pipeline_fn=pipe, devices=["cpu"])
+
+
+def test_zeros():
+    def pipe(max_batch_size, input_data, device):
+        pipe = Pipeline(batch_size=max_batch_size, num_threads=4, device_id=0)
+        dist = fn.zeros(shape=())
+        data = fn.external_source(source=input_data, cycle=False, device=device)
+        processed = data * dist
+        pipe.set_outputs(processed)
+        return pipe
+
+    run_pipeline(generate_data(31, 13, array_1d_shape_generator), pipeline_fn=pipe, devices=["cpu"])
+
+
+def test_ones():
+    def pipe(max_batch_size, input_data, device):
+        pipe = Pipeline(batch_size=max_batch_size, num_threads=4, device_id=0)
+        dist = fn.ones(shape=())
+        data = fn.external_source(source=input_data, cycle=False, device=device)
+        processed = data * dist
+        pipe.set_outputs(processed)
+        return pipe
+
+    run_pipeline(generate_data(31, 13, array_1d_shape_generator), pipeline_fn=pipe, devices=["cpu"])
+
+
+def test_full():
+    def pipe(max_batch_size, input_data, device):
+        pipe = Pipeline(batch_size=max_batch_size, num_threads=4, device_id=0)
+        dist = fn.full(np.array([1]), shape=(1,))
+        data = fn.external_source(source=input_data, cycle=False, device=device)
+        processed = data * dist
+        pipe.set_outputs(processed)
+        return pipe
+
+    run_pipeline(generate_data(31, 13, array_1d_shape_generator), pipeline_fn=pipe, devices=["cpu"])
+
+
+def test_full_like():
+    def pipe(max_batch_size, input_data, device):
+        pipe = Pipeline(batch_size=max_batch_size, num_threads=4, device_id=0)
+        data = fn.external_source(source=input_data, cycle=False, device=device)
+        processed = fn.full_like(np.array([1]), data)
+        pipe.set_outputs(processed)
+        return pipe
+
+    run_pipeline(generate_data(31, 13, array_1d_shape_generator), pipeline_fn=pipe, devices=["cpu"])
+
+
+def test_io_file_read():
+    def pipe(max_batch_size, input_data, device):
+        pipe = Pipeline(batch_size=max_batch_size, num_threads=4, device_id=0)
+        data = fn.external_source(source=input_data, cycle=False, device=device, num_outputs=1)
+        out = fn.io.file.read(data)
+        pipe.set_outputs(out)
+        return pipe
+
+    def get_data(batch_size):
+        rel_fpaths = [
+            "db/single/png/0/cat-1046544_640.png",
+            "db/single/png/0/cat-111793_640.png",
+            "db/single/multichannel/with_alpha/cat-111793_640-alpha.jp2",
+            "db/single/jpeg2k/2/tiled-cat-300572_640.jp2",
+        ]
+        path_strs = [
+            os.path.join(test_utils.get_dali_extra_path(), rel_fpath) for rel_fpath in rel_fpaths
+        ]
+        data = []
+        for i in range(batch_size):
+            data.append(np.frombuffer(path_strs[i % len(rel_fpaths)].encode(), dtype=np.int8))
+        return (data,)
+
+    input_data = [get_data(random.randint(3, 9)) for _ in range(13)]
+    check_pipeline(input_data, pipeline_fn=pipe, devices=["cpu"])
+
+
 tested_methods = [
     "_conditional.merge",
     "_conditional.split",
@@ -1563,11 +1676,15 @@ tested_methods = [
     "experimental.decoders.image_slice",
     "experimental.decoders.image_random_crop",
     "experimental.decoders.video",
+    "experimental.dilate",
+    "experimental.erode",
     "experimental.filter",
     "experimental.inflate",
     "experimental.median_blur",
     "experimental.peek_image_shape",
     "experimental.remap",
+    "experimental.resize",
+    "experimental.warp_perspective",
     "external_source",
     "fast_resize_crop_mirror",
     "flip",
@@ -1632,10 +1749,13 @@ tested_methods = [
     "power_spectrum",
     "preemphasis_filter",
     "python_function",
+    "random.choice",
     "random.coin_flip",
     "random.normal",
     "random.uniform",
+    "random.beta",
     "random_bbox_crop",
+    "random_crop_generator",
     "random_resized_crop",
     "reductions.max",
     "reductions.mean",
@@ -1678,6 +1798,13 @@ tested_methods = [
     "uniform",
     "warp_affine",
     "water",
+    "zeros",
+    "zeros_like",
+    "ones",
+    "ones_like",
+    "full",
+    "full_like",
+    "io.file.read",
 ]
 
 excluded_methods = [
@@ -1712,6 +1839,7 @@ excluded_methods = [
     "experimental.readers.video",  # readers do not support variable batch size yet
     "experimental.audio_resample",  # Alias of audio_resample (already tested)
     "experimental.readers.fits",  # readers do not support variable batch size yet
+    "plugin.video.decoder",  # plugin not yet tested
 ]
 
 

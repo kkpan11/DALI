@@ -1,4 +1,4 @@
-// Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2022, 2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include <gtest/gtest.h>
+#include <fstream>
 #include <memory>
 #include <utility>
 #include <vector>
@@ -141,14 +142,14 @@ class VideoInputNextOutputDataIdTest : public ::testing::Test {
 
   void CreateAndSerializePipeline() {
     auto pipeline = std::make_unique<Pipeline>(batch_size_, num_threads_, device_id_);
+    string device = is_cpu ? "cpu" : "mixed";
+    auto storage_device = is_cpu ? StorageDevice::CPU : StorageDevice::GPU;
     pipeline->AddOperator(
             OpSpec("experimental__inputs__Video")
                     .AddArg("sequence_length", frames_per_sequence_)
-                    .AddArg("device",
-                            std::string{is_cpu ? "cpu" : "mixed"})
+                    .AddArg("device", device)
                     .AddArg("name", video_input_name_)
-                    .AddOutput(video_input_name_,
-                               std::string{is_cpu ? "cpu" : "gpu"}),
+                    .AddOutput(video_input_name_, storage_device),
             video_input_name_);
 
     std::vector<std::pair<std::string, std::string>> outputs = {

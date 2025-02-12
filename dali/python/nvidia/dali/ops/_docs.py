@@ -1,4 +1,4 @@
-# Copyright (c) 2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2023-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -32,7 +32,7 @@ def _numpydoc_formatter(name, type, doc, optional=False):
     indent = "\n" + " " * 4
     if optional:
         type += ", optional"
-    return "`{}` : {}{}{}".format(name, type, indent, doc.replace("\n", indent))
+    return "{} : {}{}{}".format(name, type, indent, doc.replace("\n", indent))
 
 
 def _get_inputs_doc(schema):
@@ -107,7 +107,7 @@ def _get_kwargs(schema):
         doc = ""
         deprecation_warning = None
         if schema.IsDeprecatedArg(arg):
-            meta = schema.DeprecatedArgMeta(arg)
+            meta = schema.DeprecatedArgInfo(arg)
             msg = meta["msg"]
             assert msg is not None
             deprecation_warning = ".. warning::\n\n    " + msg.replace("\n", "\n    ")
@@ -158,10 +158,11 @@ def _docstring_generator_main(schema_name, api):
     ret = "\n"
 
     if schema.IsDeprecated():
-        use_instead = _names._op_name(schema.DeprecatedInFavorOf(), api)
-        ret += ".. warning::\n\n   This operator is now deprecated"
-        if use_instead:
-            ret += ". Use :meth:`" + use_instead + "` instead."
+        ret += ".. warning::\n\n   This operator is now deprecated."
+        replacement = schema.DeprecatedInFavorOf()
+        if replacement:
+            use_instead = _names._op_name(replacement, api)
+            ret += " Use :meth:`" + use_instead + "` instead."
         explanation = schema.DeprecationMessage()
         if explanation:
             indent = "\n" + " " * 3
@@ -236,13 +237,11 @@ def _docstring_prefix_from_inputs(op_name):
     Generate start of the docstring for `__call__` of Operator `op_name`
     assuming the docstrings were provided for all inputs separately
 
-    Returns the signature of `__call__` and list of `Args` in appropriate section
+    Returns list of `Args` in appropriate section
     """
     schema = _b.GetSchema(op_name)
-    # Signature
-    ret = "__call__(" + schema.GetCallSignatureInputs() + ", **kwargs)\n"
     # __call__ docstring
-    ret += "\nOperator call to be used in graph definition.\n"
+    ret = "\nOperator call to be used in graph definition.\n"
     # Args section
     ret += _get_inputs_doc(schema)
     return ret
@@ -255,14 +254,12 @@ def _docstring_prefix_auto(op_name):
     """
     schema = _b.GetSchema(op_name)
     if schema.MaxNumInput() == 0:
-        return """__call__(**kwargs)
-
+        return """
 Operator call to be used in graph definition. This operator doesn't have any inputs.
 """
     elif schema.MaxNumInput() == 1:
         input_name = _names._get_input_name(schema, 0)
-        ret = f"""__call__({input_name}, **kwargs)
-
+        ret = """
 Operator call to be used in graph definition.
 
 Args

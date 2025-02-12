@@ -1,4 +1,4 @@
-// Copyright (c) 2021-2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2021-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -40,13 +40,16 @@ class VideoReaderDecoderBaseTest : public VideoTestBase {
   virtual void AssertFrame(
     int frame_id, const uint8_t *frame, TestVideo &ground_truth) = 0;
 
+  template<typename Backend>
+  int GetFrameIdx(dali::TensorList<Backend> &device_frame_idx);
+
  private:
   template<typename Backend>
   void RunTestImpl(
-    std::vector<std::string> &videos_paths,
-    std::vector<TestVideo> &ground_truth_videos,
-    std::string backend,
-    int device_id) {
+        std::vector<std::string> &videos_paths,
+        std::vector<TestVideo> &ground_truth_videos,
+        std::string backend,
+        int device_id) {
     const int batch_size = 4;
     const int sequence_length = 6;
     const int stride = 3;
@@ -54,6 +57,7 @@ class VideoReaderDecoderBaseTest : public VideoTestBase {
 
     Pipeline pipe(batch_size, 4, device_id);
 
+    auto storage_dev = ParseStorageDevice(backend);
     pipe.AddOperator(OpSpec("experimental__readers__Video")
       .AddArg("device", backend)
       .AddArg("sequence_length", sequence_length)
@@ -63,8 +67,8 @@ class VideoReaderDecoderBaseTest : public VideoTestBase {
         "filenames",
         videos_paths)
       .AddArg("labels", std::vector<int>{0, 1})
-      .AddOutput("frames", backend)
-      .AddOutput("labels", backend));
+      .AddOutput("frames", storage_dev)
+      .AddOutput("labels", storage_dev));
 
     pipe.Build({{"frames", backend}, {"labels", backend}});
 
@@ -77,8 +81,7 @@ class VideoReaderDecoderBaseTest : public VideoTestBase {
 
     Workspace ws;
     while (sequence_id < num_sequences) {
-      pipe.RunCPU();
-      pipe.RunGPU();
+      pipe.Run();
       pipe.Outputs(&ws);
 
       auto &frame_video_output = ws.Output<Backend>(0);
@@ -116,8 +119,8 @@ class VideoReaderDecoderBaseTest : public VideoTestBase {
 
   template<typename Backend>
   void RunShuffleTestImpl(
-    std::string backend,
-    int device_id) {
+        std::string backend,
+        int device_id) {
     const int batch_size = 1;
     const int sequence_length = 1;
     const int seed = 1;
@@ -126,33 +129,34 @@ class VideoReaderDecoderBaseTest : public VideoTestBase {
 
     Pipeline pipe(batch_size, 1, device_id, seed);
 
+    auto storage_device = ParseStorageDevice(backend);
     pipe.AddOperator(OpSpec("experimental__readers__Video")
       .AddArg("device", backend)
       .AddArg("sequence_length", sequence_length)
       .AddArg("random_shuffle", true)
+      .AddArg("enable_frame_num", true)
       .AddArg("initial_fill", cfr_videos_[0].NumFrames())
       .AddArg(
         "filenames",
         std::vector<std::string>{cfr_videos_paths_[0]})
-      .AddOutput("frames", backend));
+      .AddOutput("frames", storage_device)
+      .AddOutput("frame_idx", storage_device));
 
-    pipe.Build({{"frames", backend}});
-
-    std::vector<int> expected_order = {29, 46, 33, 6, 37};
+    pipe.Build({{"frames", backend}, {"frame_idx", backend}});
 
     int num_sequences = 5;
 
     Workspace ws;
     for (int sequence_id = 0; sequence_id < num_sequences; ++sequence_id) {
-      pipe.RunCPU();
-      pipe.RunGPU();
+      pipe.Run();
       pipe.Outputs(&ws);
 
       auto &frame_video_output = ws.Output<Backend>(0);
       const auto sample = frame_video_output.template tensor<uint8_t>(0);
+      int frame_idx = GetFrameIdx(ws.Output<Backend>(1));
 
-      // We want to access correct order, so we comapre only the first frame of the sequence
-      AssertFrame(expected_order[sequence_id], sample, ground_truth_video);
+      // We want to access correct order, so we compare only the first frame of the sequence
+      AssertFrame(frame_idx, sample, ground_truth_video);
     }
   }
 };
@@ -171,6 +175,15 @@ void VideoReaderDecoderBaseTest::RunShuffleTest<dali::CPUBackend>() {
 }
 
 template<>
+int VideoReaderDecoderBaseTest::GetFrameIdx(
+  dali::TensorList<dali::CPUBackend> &device_frame_idx) {
+    const auto frame_idx = device_frame_idx.template tensor<int>(0);
+    int frame_idx_buffer = -1;
+    std::copy_n(frame_idx, 1, &frame_idx_buffer);
+    return frame_idx_buffer;
+}
+
+template<>
 void VideoReaderDecoderBaseTest::RunTest<dali::GPUBackend>(
   std::vector<std::string> &videos_paths,
   std::vector<TestVideo> &ground_truth_videos) {
@@ -181,6 +194,15 @@ void VideoReaderDecoderBaseTest::RunTest<dali::GPUBackend>(
 template<>
 void VideoReaderDecoderBaseTest::RunShuffleTest<dali::GPUBackend>() {
     RunShuffleTestImpl<dali::GPUBackend>("gpu", 0);
+}
+
+template<>
+int VideoReaderDecoderBaseTest::GetFrameIdx(
+  dali::TensorList<dali::GPUBackend> &device_frame_idx) {
+    const auto frame_idx = device_frame_idx.template tensor<int>(0);
+    int frame_idx_buffer = -1;
+    MemCopy(&frame_idx_buffer, frame_idx, sizeof(int));
+    return frame_idx_buffer;
 }
 
 class VideoReaderDecoderCpuTest : public VideoReaderDecoderBaseTest {
@@ -277,8 +299,8 @@ TEST_F(VideoReaderDecoderCompareTest, CompareReaders) {
       "filenames",
       cfr_videos_paths_)
     .AddArg("labels", std::vector<int>{0, 1})
-    .AddOutput("frames_cpu", "cpu")
-    .AddOutput("labels_cpu", "cpu"));
+    .AddOutput("frames_cpu", StorageDevice::CPU)
+    .AddOutput("labels_cpu", StorageDevice::CPU));
   pipe.AddOperator(OpSpec("experimental__readers__Video")
     .AddArg("device", "gpu")
     .AddArg("sequence_length", sequence_length)
@@ -293,8 +315,8 @@ TEST_F(VideoReaderDecoderCompareTest, CompareReaders) {
       "filenames",
       cfr_videos_paths_)
     .AddArg("labels", std::vector<int>{0, 1})
-    .AddOutput("frames_gpu", "gpu")
-    .AddOutput("labels_gpu", "gpu"));
+    .AddOutput("frames_gpu", StorageDevice::GPU)
+    .AddOutput("labels_gpu", StorageDevice::GPU));
   pipe.AddOperator(OpSpec("readers__Video")
     .AddArg("device", "gpu")
     .AddArg("sequence_length", sequence_length)
@@ -309,8 +331,8 @@ TEST_F(VideoReaderDecoderCompareTest, CompareReaders) {
       "filenames",
       cfr_videos_paths_)
     .AddArg("labels", std::vector<int>{0, 1})
-    .AddOutput("frames_old", "gpu")
-    .AddOutput("labels_old", "gpu"));
+    .AddOutput("frames_old", StorageDevice::GPU)
+    .AddOutput("labels_old", StorageDevice::GPU));
 
   pipe.Build({
     {"frames_cpu", "cpu"},
@@ -327,8 +349,7 @@ TEST_F(VideoReaderDecoderCompareTest, CompareReaders) {
 
   for (int batch_id = 0; batch_id < 20; ++batch_id) {
     Workspace ws;
-    pipe.RunCPU();
-    pipe.RunGPU();
+    pipe.Run();
     pipe.Outputs(&ws);
 
     auto &cpu_frame_output = ws.Output<dali::CPUBackend>(0);

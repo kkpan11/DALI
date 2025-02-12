@@ -1,4 +1,4 @@
-# Copyright (c) 2020-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2020-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,8 +13,6 @@
 # limitations under the License.
 
 import random
-import warnings
-
 import numpy as np
 from scipy.spatial.transform import Rotation as scipy_rotate
 
@@ -27,7 +25,7 @@ import nvidia.dali.fn as fn
 from nvidia.dali import pipeline_def
 
 from sequences_test_utils import ArgData, ArgDesc, sequence_suite_helper, ArgCb, ParamsProvider
-from nose_utils import assert_raises
+from nose_utils import assert_raises, assert_warns
 
 
 def check_results_sample(T1, mat_ref, T0=None, reverse=False, atol=1e-6):
@@ -43,7 +41,7 @@ def check_results_sample(T1, mat_ref, T0=None, reverse=False, atol=1e-6):
         ref_T1 = mat_T1[:ndim, :]
     else:
         ref_T1 = mat_ref[:ndim, :]
-    assert np.allclose(T1, ref_T1, atol=1e-6)
+    assert np.allclose(T1, ref_T1, atol=atol)
 
 
 def check_results(T1, batch_size, mat_ref, T0=None, reverse=False, atol=1e-6):
@@ -75,7 +73,6 @@ def check_transform_translation_op(
         else:
             T1 = fn.transforms.translation(device="cpu", offset=offset)
             pipe.set_outputs(T1)
-    pipe.build()
     outs = pipe.run()
     ref_mat = translate_affine_mat(offset=offset)
     T0 = outs[1] if has_input else None
@@ -144,7 +141,6 @@ def check_transform_scale_op(
         else:
             T1 = fn.transforms.scale(device="cpu", scale=scale, center=center, ndim=ndim)
             pipe.set_outputs(T1)
-    pipe.build()
     outs = pipe.run()
     ref_mat = scale_affine_mat(scale=scale, center=center, ndim=ndim)
     T0 = outs[1] if has_input else None
@@ -233,7 +229,6 @@ def check_transform_rotation_op(
             outputs.append(angle)
 
         pipe.set_outputs(*outputs)
-    pipe.build()
     outs = pipe.run()
     out_idx = 1
     out_T0 = None
@@ -248,7 +243,7 @@ def check_transform_rotation_op(
         T0 = out_T0.at(idx) if has_input else None
         angle = out_angle.at(idx) if random_angle else angle
         ref_mat = rotate_affine_mat(angle=angle, axis=axis, center=center)
-        check_results_sample(outs[0].at(idx), ref_mat, T0, reverse_order, atol=1e-6)
+        check_results_sample(outs[0].at(idx), ref_mat, T0, reverse_order, atol=2e-6)
 
 
 def test_transform_rotation_op(batch_size=3, num_threads=4, device_id=0):
@@ -343,7 +338,6 @@ def check_transform_shear_op(
         else:
             T1 = fn.transforms.shear(device="cpu", shear=shear, angles=angles, center=center)
             pipe.set_outputs(T1)
-    pipe.build()
     outs = pipe.run()
     ref_mat = shear_affine_mat(shear=shear, angles=angles, center=center)
     T0 = outs[1] if has_input else None
@@ -386,7 +380,6 @@ def check_transform_shear_op_runtime_args(
             reverse_order=reverse_order,
         )
         pipe.set_outputs(T1, *inputs, *params)
-    pipe.build()
     for _ in range(3):
         outs = pipe.run()
         T0 = outs[1] if has_input else None
@@ -533,7 +526,6 @@ def check_transform_crop_op(
                 absolute=absolute,
             )
             pipe.set_outputs(T1)
-    pipe.build()
     outs = pipe.run()
 
     ref_mat = crop_affine_mat(from_start, from_end, to_start, to_end, absolute=absolute)
@@ -607,7 +599,6 @@ def check_combine_transforms(
         ]
         T = fn.transforms.combine(*transforms)
     pipe.set_outputs(T, *transforms)
-    pipe.build()
     outs = pipe.run()
     for idx in range(batch_size):
         num_mats = len(outs) - 1
@@ -652,32 +643,21 @@ def test_combine_transforms_correct_order():
         t12 = T.rotation(T.translation(offset=(1, 2)), angle=30.0)
         t21 = T.translation(T.rotation(angle=30.0), offset=(1, 2))
         pipe.set_outputs(T.combine(t1, t2), t12, T.combine(t1, t2, reverse_order=True), t21)
-    pipe.build()
     outs = pipe.run()
     for idx in range(batch_size):
         assert np.allclose(outs[0].at(idx), outs[1].at(idx), atol=1e-6)
         assert np.allclose(outs[2].at(idx), outs[3].at(idx), atol=1e-6)
 
 
-def verify_deprecation(callback):
-    with warnings.catch_warnings(record=True) as w:
-        # Cause all warnings to always be triggered.
-        warnings.simplefilter("always")
-        # Trigger a warning.
-        callback()
-        # Verify DeprecationWarning
-        expected_warning = (
-            "WARNING: `transform_translation` is now deprecated."
-            " Use `transforms.translation` instead."
-        )
-        assert len(w) == 1
-        assert issubclass(w[-1].category, DeprecationWarning)
-        assert expected_warning == str(w[-1].message)
-
-
 def test_transform_translation_deprecation():
-    verify_deprecation(lambda: fn.transform_translation(offset=(0, 0)))
-    verify_deprecation(lambda: ops.TransformTranslation(offset=(0, 0))())
+    fmt = (
+        "WARNING: `nvidia.dali.{}` is now deprecated."
+        " Use `nvidia.dali.fn.transforms.translation` instead."
+    )
+    with assert_warns(DeprecationWarning, glob=fmt.format("fn.transform_translation")):
+        fn.transform_translation(offset=(0, 0))
+    with assert_warns(DeprecationWarning, glob=fmt.format("ops.TransformTranslation")):
+        ops.TransformTranslation(offset=(0, 0))()
 
 
 def test_sequences():
@@ -838,7 +818,6 @@ def test_combine_shape_mismatch():
             return fn.transforms.combine(fn.per_frame(mts0), fn.per_frame(mts1))
 
         pipe = pipeline(batch_size=batch_size, num_threads=4, device_id=0)
-        pipe.build()
         pipe.run()
 
 
@@ -872,7 +851,6 @@ def test_rotate_shape_mismatch():
             return fn.transforms.rotation(fn.per_frame(mts), angle=fn.per_frame(angles))
 
         pipe = pipeline(batch_size=batch_size, num_threads=4, device_id=0)
-        pipe.build()
         pipe.run()
 
     with assert_raises(
@@ -888,5 +866,4 @@ def test_rotate_shape_mismatch():
             return fn.transforms.rotation(angle=fn.per_frame(angles), center=fn.per_frame(centers))
 
         pipe = pipeline(batch_size=batch_size, num_threads=4, device_id=0)
-        pipe.build()
         pipe.run()

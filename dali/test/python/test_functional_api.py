@@ -1,4 +1,4 @@
-# Copyright (c) 2020-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2020-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,10 +17,9 @@ import nvidia.dali.ops as ops
 from nvidia.dali.pipeline import Pipeline
 import nvidia.dali.types as types
 import numpy as np
-from nose_utils import assert_raises
+from nose_utils import assert_raises, attr
 import sys
 import inspect
-from nose.plugins.attrib import attr
 import nose
 
 
@@ -36,7 +35,6 @@ def _test_fn_rotate(device):
     rotated = fn.rotate(input.gpu() if device == "gpu" else input, angle=90)
     pipe.set_outputs(rotated)
 
-    pipe.build()
     outs = pipe.run()
     out = outs[0] if device == "cpu" else outs[0].as_cpu()
     arr = out.at(0)
@@ -88,7 +86,6 @@ def test_fn_python_function():
         src = fn.external_source([batch1, batch2])
         out = fn.python_function(src, function=lambda x: x + 1)
         pipe.set_outputs(out)
-    pipe.build()
 
     assert np.array_equal(pipe.run()[0].at(0), batch1[0] + 1)
     assert np.array_equal(pipe.run()[0].at(0), batch2[0] + 1)
@@ -107,7 +104,6 @@ def test_fn_multiple_input_sets():
     rotated = fn.rotate(inputs, angle=90)
     pipe.set_outputs(*rotated)
 
-    pipe.build()
     outs = pipe.run()
     arr1 = outs[0].at(0)
     arr2 = outs[1].at(0)
@@ -130,7 +126,6 @@ def test_scalar_constant():
     rotated = fn.rotate(inputs, angle=types.ScalarConstant(90))
     pipe.set_outputs(*rotated, types.ScalarConstant(90))
 
-    pipe.build()
     outs = pipe.run()
     arr1 = outs[0].at(0)
     arr2 = outs[1].at(0)

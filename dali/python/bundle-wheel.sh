@@ -1,6 +1,6 @@
 #!/bin/bash -e
 #
-# Copyright (c) 2018-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2018-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -60,9 +60,6 @@ fi
 
 SCRIPT_PATH=$(dirname $(readlink -f $0))
 
-# For some reason the pip wheel builder inserts "-none-" into the tag even if you gave it an ABI name
-OUTWHLNAME=${OUTWHLNAME//-none-/-}
-
 PKGNAME=$(echo "$OUTWHLNAME" | sed 's/-.*$//')
 PKGNAME_PATH=$(echo "$PKGNAME" | sed 's/_/\//' | sed 's/_.*$//')
 
@@ -106,11 +103,11 @@ make_wheel_record() {
 DEPS_LIST=(
     "${DEPS_PATH}/lib64/libjpeg.so.62"
     "${DEPS_PATH}/lib/libjpeg.so.62"
-    "${DEPS_PATH}/lib/libavformat.so.60"
-    "${DEPS_PATH}/lib/libavcodec.so.60"
-    "${DEPS_PATH}/lib/libavfilter.so.9"
-    "${DEPS_PATH}/lib/libavutil.so.58"
-    "${DEPS_PATH}/lib/libswscale.so.7"
+    "${DEPS_PATH}/lib/libavformat.so.61"
+    "${DEPS_PATH}/lib/libavcodec.so.61"
+    "${DEPS_PATH}/lib/libavfilter.so.10"
+    "${DEPS_PATH}/lib/libavutil.so.59"
+    "${DEPS_PATH}/lib/libswscale.so.8"
     "${DEPS_PATH}/lib/libtiff.so.6"
     "${DEPS_PATH}/lib/libsndfile.so.1"
     "${DEPS_PATH}/lib/libFLAC.so.12"
@@ -122,6 +119,23 @@ DEPS_LIST=(
     "${DEPS_PATH}/lib/libzstd.so.1"
     "${DEPS_PATH}/lib/libz.so.1"
     "${DEPS_PATH}/lib/libcfitsio.so.4"
+    "${DEPS_PATH}/lib/libaws-cpp-sdk-core.so"
+    "${DEPS_PATH}/lib/libaws-cpp-sdk-s3.so"
+    "${DEPS_PATH}/lib/libaws-crt-cpp.so"
+    "${DEPS_PATH}/lib/libaws-c-mqtt.so.1.0.0"
+    "${DEPS_PATH}/lib/libaws-c-event-stream.so.1.0.0"
+    "${DEPS_PATH}/lib/libaws-c-common.so.1.0.0"
+    "${DEPS_PATH}/lib/libaws-c-common.so.1"
+    "${DEPS_PATH}/lib/libaws-c-sdkutils.so.1.0.0"
+    "${DEPS_PATH}/lib/libaws-c-io.so.1.0.0"
+    "${DEPS_PATH}/lib/libaws-c-cal.so.1.0.0"
+    "${DEPS_PATH}/lib/libaws-c-compression.so.1.0.0"
+    "${DEPS_PATH}/lib/libaws-c-http.so.1.0.0"
+    "${DEPS_PATH}/lib/libaws-c-auth.so.1.0.0"
+    "${DEPS_PATH}/lib/libaws-checksums.so.1.0.0"
+    "${DEPS_PATH}/lib/libaws-c-s3.so.1.0.0"
+    "${DEPS_PATH}/lib/libaws-c-s3.so.0unstable"
+    "${DEPS_PATH}/lib/libs2n.so.1"
     "lib/libcvcuda.so.0"
     "lib/libnvcv_types.so.0"
     # cvcuda adds _d suffix to lib names for debug builds
@@ -236,8 +250,8 @@ echo "Fixed hashed names"
 patch_rpath() {
     local FILE=$1
     UPDIRS=$(dirname $(echo "$FILE" | sed "s|$PKGNAME_PATH||") | sed 's/[^\/][^\/]*/../g')
-    echo "Setting rpath of $FILE to '\$ORIGIN:\$ORIGIN$UPDIRS:\$ORIGIN$UPDIRS/.libs:\$ORIGIN/../cufft/lib:\$ORIGIN/../npp/lib:\$ORIGIN/../nvjpeg/lib:/usr/local/cuda/lib64'"
-    patchelf --set-rpath "\$ORIGIN:\$ORIGIN$UPDIRS:\$ORIGIN$UPDIRS/.libs:\$ORIGIN/../cufft/lib:\$ORIGIN/../npp/lib:\$ORIGIN/../nvjpeg/lib:/usr/local/cuda/lib64" $FILE
+    echo "Setting rpath of $FILE to '\$ORIGIN:\$ORIGIN$UPDIRS:\$ORIGIN$UPDIRS/.libs:\$ORIGIN/../cufft/lib:\$ORIGIN/../npp/lib:\$ORIGIN/../nvjpeg/lib:\$ORIGIN/../nvimgcodec:/usr/local/cuda/lib64'"
+    patchelf --set-rpath "\$ORIGIN:\$ORIGIN$UPDIRS:\$ORIGIN$UPDIRS/.libs:\$ORIGIN/../cufft/lib:\$ORIGIN/../npp/lib:\$ORIGIN/../nvjpeg/lib:\$ORIGIN/../nvimgcodec:/usr/local/cuda/lib64" $FILE
     patchelf --print-rpath $FILE
 }
 echo "Fixing rpath of main files..."
@@ -271,8 +285,7 @@ echo "Fixed rpath of .lib files"
 
 # correct the metadata in the dist-info/WHEEL, e.g.:
 #Root-Is-Purelib: true
-#Tag: cp27-cp27mu-none-manylinux1_x86_64
-sed -i 's/\(Tag:.*\)-none-/\1-/;s/\(Root-Is-Purelib:\) true/\1 false/' ${PKGNAME}-*.dist-info/WHEEL
+sed -i 's/\(Root-Is-Purelib:\) true/\1 false/' ${PKGNAME}-*.dist-info/WHEEL
 
 # regenerate the RECORD file with new hashes
 RECORD_FILE=$(ls $PKGNAME-*.dist-info/RECORD)
@@ -288,12 +301,16 @@ for ((i=0;i<${#rec_list[@]};++i)); do
    make_wheel_record $FNAME $RECORD_FILE $TMPDIR &
 done
 wait
+
+echo "Removing lock file..."
+rm -f $TMPDIR/dali_rec.lock
+
 echo "$RECORD_FILE,," >> $RECORD_FILE
 echo "Finished generating new record file $RECORD_FILE"
 
 if [[ "$TEST_BUNDLED_LIBS" != "NO" ]]; then
     echo "Check bundled libs..."
-    python ${SCRIPT_PATH}/../../tools/test_bundled_libs.py $(find ./ -iname *.so* | tr '\n' ' ')
+    python ${SCRIPT_PATH}/../../internal_tools/test_bundled_libs.py $(find ./ -iname *.so* | tr '\n' ' ')
 fi
 
 # zip up the new wheel into the wheelhouse

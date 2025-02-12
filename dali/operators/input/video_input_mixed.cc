@@ -1,4 +1,4 @@
-// Copyright (c) 2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2023-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -25,6 +25,8 @@ void VideoInput<MixedBackend, dali::FramesDecoderGpu>::CreateDecoder(const Works
   size_t size = sample.shape().num_elements();
   this->frames_decoders_[0] = std::make_unique<dali::FramesDecoderGpu>(data, size, ws.stream(),
                                                                        false);
+  DALI_ENFORCE(this->frames_decoders_[0]->IsValid(),
+               "Failed to create video decoder for provided video data");
 }
 
 
@@ -37,7 +39,7 @@ class VideoInputMixed : public VideoInput<MixedBackend> {
    */
  public:
   explicit VideoInputMixed(const OpSpec &spec) : VideoInput<MixedBackend>(spec) {}
-  void Run(Workspace &ws) override { VideoInputRunImpl(ws); }
+  void RunImpl(Workspace &ws) override { VideoInputRunImpl(ws); }
 };
 
 DALI_REGISTER_OPERATOR(experimental__inputs__Video, VideoInputMixed, Mixed);

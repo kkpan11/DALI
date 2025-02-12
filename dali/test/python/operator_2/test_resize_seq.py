@@ -1,4 +1,4 @@
-# Copyright (c) 2020-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2020-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -40,9 +40,8 @@ def init_video_data():
         input = fn.readers.video(device="gpu", filenames=video_files, sequence_length=32, stride=5)
         video_pipe.set_outputs(input)
 
-    video_pipe.build()
     out = video_pipe.run()
-    in_seq = out[0].as_cpu().at(0)
+    in_seq = np.array(out[0].at(0).as_cpu())
     return in_seq
 
 
@@ -132,7 +131,7 @@ def create_dali_pipe(channel_first, seq_len, interp, dtype, w, h, batch_size=2):
         dali_resized_gpu, size_gpu = resize_gpu_out
         # extract just HW part from the input shape
         ext_size = fn.slice(
-            fn.cast(fn.shapes(ext), dtype=types.INT32), 2 if channel_first else 1, 2, axes=[0]
+            fn.cast(ext.shape(), dtype=types.INT32), 2 if channel_first else 1, 2, axes=[0]
         )
         pipe.set_outputs(dali_resized_cpu, dali_resized_gpu, ext_size, size_cpu, size_gpu)
     return pipe
@@ -141,9 +140,7 @@ def create_dali_pipe(channel_first, seq_len, interp, dtype, w, h, batch_size=2):
 def _test_resize(layout, interp, dtype, w, h):
     channel_first = layout == "FCHW"
     pipe_dali = create_dali_pipe(channel_first, 8, interp, dtype, w, h)
-    pipe_dali.build()
     pipe_ref = create_ref_pipe(channel_first, 8, interp, dtype, w, h)
-    pipe_ref.build()
     eps = 1e-2
     max_err = 6
     for iter in range(4):

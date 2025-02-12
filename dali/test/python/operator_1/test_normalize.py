@@ -1,4 +1,4 @@
-# Copyright (c) 2020-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2020-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,7 +13,6 @@
 # limitations under the License.
 
 from nvidia.dali.pipeline import Pipeline
-from nvidia.dali import backend
 import nvidia.dali.ops as ops
 import numpy as np
 from test_utils import dali_type
@@ -34,7 +33,7 @@ def normalize(x, axes=None, mean=None, stddev=None, ddof=0, eps=0):
 
     if stddev is None:
         factor = num_reduced - ddof
-        sqr = (x - mean).astype(np.float) ** 2
+        sqr = (x - mean).astype(float) ** 2
         var = np.sum(sqr, axis=axes, keepdims=True)
         if factor > 0:
             var /= factor
@@ -198,7 +197,7 @@ def normalize_list(whole_batch, data_batch, axes=None, mean=None, stddev=None, d
         if type(stddev) is not list:
             stddev = [stddev] * len(data_batch)
         return [
-            normalize(data_batch[i].astype(np.float), axes, mean[i], stddev[i], ddof, eps)
+            normalize(data_batch[i].astype(float), axes, mean[i], stddev[i], ddof, eps)
             for i in range(len(data_batch))
         ]
 
@@ -395,8 +394,7 @@ class NormalizePipeline(Pipeline):
 
 
 def to_list(tensor_list):
-    if isinstance(tensor_list, backend.TensorListGPU):
-        tensor_list = tensor_list.as_cpu()
+    tensor_list = tensor_list.as_cpu()
     out = []
     for i in range(len(tensor_list)):
         out.append(tensor_list.at(i))
@@ -450,7 +448,6 @@ def _run_test(
     pipe = NormalizePipeline(
         device, batch_size, dim, axes, axis_names, batch_norm, out_type, in_type, shift, scale
     )
-    pipe.build()
     for iter in range(2):
         out = pipe.run()
         pipe.check_batch(*[to_list(x) for x in out])
@@ -515,5 +512,4 @@ def test_batch_of_empty_samples(device):
         return fn.normalize(empty_sample, mean=5, stddev=1)
 
     p = pipeline(batch_size=4, device_id=0, num_threads=4)
-    p.build()
     p.run()

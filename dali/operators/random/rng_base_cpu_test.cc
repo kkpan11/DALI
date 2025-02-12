@@ -1,4 +1,4 @@
-// Copyright (c) 2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2023-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -34,15 +34,14 @@ class RNGCheckpointingTest : public ::testing::Test {
     for (Pipeline *pipe : {&original_pipe, &restored_pipe}) {
       pipe->AddOperator(
         OpSpec(name)
-        .AddOutput("data_out", "cpu"), "rng_op");
+        .AddOutput("data_out", StorageDevice::CPU), "rng_op");
       std::vector<std::pair<string, string>> outputs = {{"data_out", "cpu"}};
       pipe->Build(outputs);
     }
 
     Workspace ws;
     auto run_iteration = [&](Pipeline &pipe) {
-      pipe.RunCPU();
-      pipe.RunGPU();
+      pipe.Run();
       pipe.Outputs(&ws);
 
       std::vector<DataType> result;
@@ -61,10 +60,10 @@ class RNGCheckpointingTest : public ::testing::Test {
       run_iteration(original_pipe);
 
     // save and restore the pipeline
-    auto node = original_pipe.GetOperatorNode("rng_op");
-    OpCheckpoint cpt(node->spec);
-    node->op->SaveState(cpt, {});
-    restored_pipe.GetOperatorNode("rng_op")->op->RestoreState(cpt);
+    auto op = original_pipe.GetOperator("rng_op");
+    OpCheckpoint cpt("rng_op");
+    op->SaveState(cpt, {});
+    restored_pipe.GetOperator("rng_op")->RestoreState(cpt);
 
     // make sure the restored pipeline has the same internal state
     for (int i = 0; i < iterations; i++)

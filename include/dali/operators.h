@@ -1,4 +1,4 @@
-// Copyright (c) 2019-2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2019-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -41,6 +41,19 @@ int GetNppVersion();
  * @returns MAJOR*1000 + MINOR*10 + PATH or -1 if not available
  */
 int GetNvjpegVersion();
+
+/**
+ * @brief  Returns version of available nvImageCodec library
+ *
+ * @returns MAJOR*1000 + MINOR*100 + PATH or -1 if not available
+ */
+int GetNvimgcodecVersion();
+
+/**
+ * @brief Enforces that the runtime version of nvImageCodec is at least
+ *        the one we built for.
+ */
+void EnforceMinimumNvimgcodecVersion();
 
 }  // namespace dali
 extern "C" void daliInitOperators();

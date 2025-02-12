@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -39,13 +39,17 @@ doc(
         doc_entry(
             "gpu_python_operator.ipynb",
             [
-                op_reference("fn.python_function", "Processing GPU Data with Python Operators"),
+                op_reference(
+                    "fn.python_function",
+                    "Processing GPU Data with Python Operators",
+                ),
                 op_reference(
                     "plugin.pytorch.fn.torch_python_function",
                     "Processing GPU Data with Python Operators",
                 ),
                 op_reference(
-                    "fn.dl_tensor_python_function", "Processing GPU Data with Python Operators"
+                    "fn.dl_tensor_python_function",
+                    "Processing GPU Data with Python Operators",
                 ),
             ],
         ),
@@ -54,6 +58,20 @@ doc(
             op_reference(
                 "plugin.numba.fn.experimental.numba_function",
                 "Running custom operations written as Numba JIT-compiled functions",
+            ),
+        ),
+        doc_entry(
+            "jax_operator_basic.ipynb",
+            op_reference(
+                "plugin.jax.fn.jax_function",
+                "Running custom JAX augmentations in DALI",
+            ),
+        ),
+        doc_entry(
+            "jax_operator_multi_gpu.ipynb",
+            op_reference(
+                "plugin.jax.fn.jax_function",
+                "Running JAX augmentations on multiple GPUs",
             ),
         ),
     ],

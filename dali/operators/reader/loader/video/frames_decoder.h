@@ -59,8 +59,16 @@ struct AvState {
     }
     avcodec_free_context(&codec_ctx_);
     if (ctx_ != nullptr) {
+      // if we use avio_alloc_context we need a custom deallocator for ctx_->pb
+      auto custom_dealloc = ctx_->flags & AVFMT_FLAG_CUSTOM_IO;
+      auto custom_ctx = ctx_->pb;
+      auto custom_buffer = ctx_->pb ? ctx_->pb->buffer : nullptr;
       avformat_close_input(&ctx_);
       avformat_free_context(ctx_);
+      if (custom_dealloc) {
+        av_freep(&custom_buffer);
+        avio_context_free(&custom_ctx);
+      }
     }
 
     ctx_ = nullptr;
@@ -117,7 +125,7 @@ class DLL_PUBLIC FramesDecoder {
    * `memory_file_size` arguments cover the entire video file, including the header.
    */
   FramesDecoder(const char *memory_file, int memory_file_size, bool build_index = true,
-                bool init_codecs = true, int num_frames = -1);
+                bool init_codecs = true, int num_frames = -1, std::string_view source_info = {});
 
   /**
    * @brief Number of frames in the video. It returns 0, if this information is unavailable.
@@ -199,7 +207,7 @@ class DLL_PUBLIC FramesDecoder {
   virtual ~FramesDecoder() = default;
 
   std::string Filename() {
-    return filename_.has_value() ? filename_.value() : "memory file";
+    return filename_.size() ? filename_ : "memory file";
   }
 
   bool IsValid() {
@@ -216,6 +224,9 @@ class DLL_PUBLIC FramesDecoder {
   int next_frame_idx_ = 0;
 
   bool is_full_range_ = false;
+
+  // False when the file doesn't have any correct content or doesn't have a valid video stream
+  bool is_valid_ = false;
 
   std::optional<bool> zero_latency_ = {};
 
@@ -275,10 +286,8 @@ class DLL_PUBLIC FramesDecoder {
   int channels_ = 3;
   bool flush_state_ = false;
   bool is_vfr_ = false;
-  // False when the file doesn't have any correct content or doesn't have valid video stream
-  bool is_valid_ = false;
 
-  std::optional<const std::string> filename_ = {};
+  const std::string filename_ = {};
   std::optional<MemoryVideoFile> memory_video_file_ = {};
 
   std::optional<int> num_frames_ = {};

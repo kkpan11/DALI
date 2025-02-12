@@ -1,4 +1,4 @@
-# Copyright (c) 2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2023-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,10 +14,8 @@
 
 import os
 import glob
-import nose
 import numpy as np
 import itertools
-import nvidia.dali as dali
 from nvidia.dali import fn, pipeline_def, types
 from test_utils import (
     compare_pipelines,
@@ -26,10 +24,10 @@ from test_utils import (
     check_numba_compatibility_cpu,
     has_operator,
     restrict_platform,
+    is_of_supported,
 )
 from nose2.tools import params, cartesian_params
-from nose_utils import assert_raises
-from nose.plugins.attrib import attr
+from nose_utils import assert_raises, SkipTest, attr
 
 # Test configuration
 batch_size = 8
@@ -43,9 +41,7 @@ stateless_signed_off = create_sign_off_decorator()
 
 
 def tensor_list_to_array(tensor_list):
-    if isinstance(tensor_list, dali.backend_impl.TensorListGPU):
-        tensor_list = tensor_list.as_cpu()
-    return tensor_list.as_array()
+    return tensor_list.as_cpu().as_array()
 
 
 # Check whether a given pipeline is stateless
@@ -59,7 +55,6 @@ def check_is_pipeline_stateless(pipeline_factory, iterations=10):
     }
 
     pipe = pipeline_factory(**args)
-    pipe.build()
     for _ in range(iterations):
         pipe.run()
 
@@ -140,6 +135,16 @@ def check_single_1d_input(op, device, **kwargs):
             source=RandomBatch(data_shape=[100], dtype=np.float32), batch=True
         )
         return op(move_to(data, device), device=device, **kwargs)
+
+    check_is_pipeline_stateless(pipeline_factory)
+
+
+def check_single_filepath_input(op, device, **kwargs):
+    @pipeline_def(enable_checkpointing=True)
+    def pipeline_factory():
+        path_str = os.path.join(get_dali_extra_path(), "db/single/jpeg/100/swan-3584559_640.jpg")
+        path = np.frombuffer(path_str.encode(), dtype=np.int8)
+        return op(move_to(path, device), device=device, **kwargs)
 
     check_is_pipeline_stateless(pipeline_factory)
 
@@ -571,10 +576,8 @@ def test_preemphasis_filter_stateless(device):
 
 @stateless_signed_off("optical_flow")
 def test_optical_flow_stateless():
-    from test_optical_flow import is_of_supported
-
     if not is_of_supported():
-        raise nose.SkipTest("Optical Flow is not supported on this platform")
+        raise SkipTest("Optical Flow is not supported on this platform")
     check_single_sequence_input(fn.optical_flow, "gpu")
 
 
@@ -977,3 +980,51 @@ def test_split_and_merge(device):
             return data + types.Constant(1, dtype=types.DALIDataType.UINT8)
 
     check_is_pipeline_stateless(pipeline_factory)
+
+
+@params("gpu")
+@stateless_signed_off("experimental.dilate")
+def test_dilate_stateless(device):
+    check_single_input(fn.experimental.dilate, device)
+
+
+@params("gpu")
+@stateless_signed_off("experimental.erode")
+def test_erode_stateless(device):
+    check_single_input(fn.experimental.erode, device)
+
+
+@params("gpu")
+@stateless_signed_off("experimental.warp_perspective")
+def test_warp_perspective_stateless(device):
+    check_single_input(fn.experimental.warp_perspective, device, matrix=np.eye(3))
+
+
+@params("gpu")
+@stateless_signed_off("experimental.resize")
+def test_experimental_resize(device):
+    check_single_input(fn.experimental.resize, device, resize_x=50, resize_y=50)
+
+
+@params("cpu")
+@stateless_signed_off("zeros", "ones", "full", "zeros_like", "ones_like", "full_like")
+def test_full_operator_family(device):
+    @pipeline_def(enable_checkpointing=True)
+    def pipeline_factory():
+        sh = np.array([2, 3], dtype=np.int32)
+        fill_value = np.array([1.0, 0.4, 3.0], dtype=np.float32)
+        zeros = fn.zeros(shape=sh)
+        ones = fn.ones(shape=sh)
+        full = fn.full(fill_value, shape=sh)
+        zeros_like = fn.zeros_like(zeros)
+        ones_like = fn.ones_like(zeros)
+        full_like = fn.full_like(zeros, fill_value)
+        return zeros, ones, full, zeros_like, ones_like, full_like
+
+    check_is_pipeline_stateless(pipeline_factory)
+
+
+@params("cpu")
+@stateless_signed_off("io.file.read")
+def test_io_file_read(device):
+    check_single_filepath_input(fn.io.file.read, device)

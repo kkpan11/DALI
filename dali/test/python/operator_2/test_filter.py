@@ -1,4 +1,4 @@
-# Copyright (c) 2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2023-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,7 +20,7 @@ import numpy as np
 from nvidia.dali import pipeline_def, fn, types
 from test_utils import get_dali_extra_path, np_type_to_dali, check_batch
 from nose2.tools import params
-from nose.plugins.attrib import attr
+from nose_utils import attr
 from filter_test_utils import filter_baseline, filter_baseline_layout
 
 data_root = get_dali_extra_path()
@@ -169,7 +169,6 @@ def test_image_pipeline(dev, dtype, batch_size, border, mode):
         mode=mode,
         dev=dev,
     )
-    pipe.build()
     atol = 1 if np.issubdtype(dtype, np.integer) else 1e-5
     for _ in range(num_iters):
         filtered_imgs, imgs, kernels, anchors, fill_values = pipe.run()
@@ -345,7 +344,6 @@ def slow_test_samples(
         mode=mode,
         dev=dev,
     )
-    pipe.build()
     if dtype == np.float32:
         atol = 1e-5
     elif dtype == np.float16:

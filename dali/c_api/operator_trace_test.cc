@@ -1,4 +1,4 @@
-// Copyright (c) 2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2023-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,12 +13,13 @@
 // limitations under the License.
 
 #include <gtest/gtest.h>
-#include <thrust/host_vector.h>
-#include <thrust/device_vector.h>
 #include <memory>
 #include "dali/c_api.h"
 #include "dali/pipeline/pipeline.h"
 #include "dali/test/dali_test_config.h"
+#include "dali/test/test_tensors.h"
+#include "dali/test/tensor_test_utils.h"
+
 
 namespace dali::test {
 
@@ -45,14 +46,18 @@ OperatorTraceTestParam operator_trace_test_params_pipelined_executor_uniform_que
 };
 
 OperatorTraceTestParam operator_trace_test_params_pipelined_executor_separate_queue[] = {
-        {2, 3, true, false},
-        {3, 2, true, false},
         {2, 3, true, true},
         {3, 2, true, true},
+        {2, 3, true, false},
+        {2, 2, true, false},
 };
 
-std::array<std::string, 2> operator_under_test_names = {
-        "PassthroughWithTraceOpCpu", "PassthroughWithTraceOpGpu"
+const char *operator_under_test_names[] = {
+    "PassthroughWithTraceOpCpu", "PassthroughWithTraceOpGpu"
+};
+
+const char *operator_trace_names[] = {
+    "trace1", "trace2"
 };
 
 }  // namespace
@@ -104,17 +109,19 @@ class OperatorTraceTest : public ::testing::TestWithParam<OperatorTraceTestParam
                                    .AddArg("device", "cpu")
                                    .AddArg("file_root", file_root)
                                    .AddArg("file_list", file_list)
-                                   .AddOutput("compressed_images", "cpu")
-                                   .AddOutput("labels", "cpu"));
+                                   .AddOutput("compressed_images", StorageDevice::CPU)
+                                   .AddOutput("labels", StorageDevice::CPU));
     pipeline_->AddOperator(OpSpec("PassthroughWithTraceOp")
                                    .AddArg("device", "cpu")
-                                   .AddInput("compressed_images", "cpu")
-                                   .AddOutput("PT_CPU", "cpu"),
+                                   .AddInput("compressed_images", StorageDevice::CPU)
+                                   .AddOutput("PT_CPU", StorageDevice::CPU)
+                                   .AddArg("trace_name", operator_trace_names[0]),
                            operator_under_test_names[0]);
     pipeline_->AddOperator(OpSpec("PassthroughWithTraceOp")
                                    .AddArg("device", "gpu")
-                                   .AddInput("compressed_images", "gpu")
-                                   .AddOutput("PT_GPU", "gpu"),
+                                   .AddInput("compressed_images", StorageDevice::GPU)
+                                   .AddOutput("PT_GPU", StorageDevice::GPU)
+                                   .AddArg("trace_name", operator_trace_names[1]),
                            operator_under_test_names[1]);
 
     std::vector<std::pair<std::string, std::string>> outputs = {
@@ -133,16 +140,19 @@ TEST_P(OperatorTraceTest, OperatorTraceTest) {
                       num_threads_, device_id_, exec_pipelined_, exec_async_, exec_separated_,
                       cpu_queue_depth_, cpu_queue_depth_, gpu_queue_depth_, 0);
   for (int iteration = 0; iteration < n_iterations_; iteration++) {
+    daliPrefetch(&h);
     auto prefetch_depth = std::min(cpu_queue_depth_, gpu_queue_depth_);
-    daliPrefetchUniform(&h, prefetch_depth);
     for (int i = 0; i < prefetch_depth; i++) {
       daliShareOutput(&h);
 
-      for (const auto & operator_name : operator_under_test_names) {
-        EXPECT_EQ(daliHasOperatorTrace(&h, operator_name.c_str(), "this_trace_does_not_exist"), 0);
-        ASSERT_NE(daliHasOperatorTrace(&h, operator_name.c_str(), "test_trace"), 0);
+      for (size_t op = 0; op < std::size(operator_under_test_names); op++) {
+        const char *operator_name = operator_under_test_names[op];
+        const char *trace_name = operator_trace_names[op];
+        EXPECT_EQ(daliHasOperatorTrace(&h, operator_name, "this_trace_does_not_exist"), 0);
+        ASSERT_NE(daliHasOperatorTrace(&h, operator_name, trace_name), 0)
+          << "operator_name: " << operator_name << "\ntrace_name: " << trace_name;
 
-        EXPECT_EQ(std::string(daliGetOperatorTrace(&h, operator_name.c_str(), "test_trace")),
+        EXPECT_EQ(std::string(daliGetOperatorTrace(&h, operator_name, trace_name)),
                   make_string("test_value", iteration * prefetch_depth + i));
       }
 
@@ -184,13 +194,15 @@ class OperatorTraceTestExternalInput : public OperatorTraceTest {
     pipeline_->AddExternalInput("OP_TRACE_IN_GPU", "gpu");
     pipeline_->AddOperator(OpSpec("PassthroughWithTraceOp")
                                    .AddArg("device", "cpu")
-                                   .AddInput("OP_TRACE_IN_CPU", "cpu")
-                                   .AddOutput("PT_CPU", "cpu"),
+                                   .AddInput("OP_TRACE_IN_CPU", StorageDevice::CPU)
+                                   .AddArg("trace_name", operator_trace_names[0])
+                                   .AddOutput("PT_CPU", StorageDevice::CPU),
                            operator_under_test_names[0]);
     pipeline_->AddOperator(OpSpec("PassthroughWithTraceOp")
                                    .AddArg("device", "gpu")
-                                   .AddInput("OP_TRACE_IN_GPU", "gpu")
-                                   .AddOutput("PT_GPU", "gpu"),
+                                   .AddInput("OP_TRACE_IN_GPU", StorageDevice::GPU)
+                                   .AddArg("trace_name", operator_trace_names[1])
+                                   .AddOutput("PT_GPU", StorageDevice::GPU),
                            operator_under_test_names[1]);
 
     std::vector<std::pair<std::string, std::string>> outputs = {
@@ -206,18 +218,10 @@ class OperatorTraceTestExternalInput : public OperatorTraceTest {
 namespace {
 
 template<typename T>
-thrust::host_vector<T> random_vector_cpu(std::mt19937 &mt, size_t size) {
-  std::vector<T> ret(size);
-  std::uniform_int_distribution<T> dist{0, 255};
-  auto gen = [&]() { return dist(mt); };
-  std::generate(ret.begin(), ret.end(), gen);
-  return ret;
-}
-
-
-template<typename T>
-thrust::device_vector<T> random_vector_gpu(std::mt19937 &mt, size_t size) {
-  thrust::device_vector<T> ret = random_vector_cpu<T>(mt, size);
+kernels::TestTensorList<T> random_vector(std::mt19937 &mt, size_t size) {
+  kernels::TestTensorList<T> ret;
+  ret.reshape(uniform_list_shape(1, {size}));
+  UniformRandomFill(ret.cpu(), mt, 0, 255);
   return ret;
 }
 
@@ -234,34 +238,41 @@ TEST_P(OperatorTraceTestExternalInput, OperatorTraceTestExternalInput) {
     auto prefetch_depth = std::min(cpu_queue_depth_, gpu_queue_depth_);
 
     // Feed CPU input data.
-    for (int i = 0; i < prefetch_depth; i++) {
+    int feed_count_cpu = daliInputFeedCount(&h, "OP_TRACE_IN_CPU");
+    ASSERT_GE(feed_count_cpu, 1);
+    for (int i = 0; i < feed_count_cpu; i++) {
       size_t sample_size = 42;
-      auto in_data = random_vector_cpu<uint8_t>(rng, sample_size * batch_size_);
+      auto in_data = random_vector<uint8_t>(rng, sample_size * batch_size_);
       std::vector<int64_t> shapes(batch_size_, sample_size);
-      daliSetExternalInput(&h, "OP_TRACE_IN_CPU", device_type_t::CPU, in_data.data(),
+      daliSetExternalInput(&h, "OP_TRACE_IN_CPU", device_type_t::CPU, in_data.cpu().tensor_data(0),
                            dali_data_type_t::DALI_UINT8, shapes.data(), 1, nullptr,
                            DALI_ext_default);
     }
 
     // Feed GPU input data.
-    for (int i = 0; i < prefetch_depth; i++) {
+    int feed_count_gpu = daliInputFeedCount(&h, "OP_TRACE_IN_GPU");
+    ASSERT_GE(feed_count_gpu, 1);
+    for (int i = 0; i < feed_count_gpu; i++) {
       int sample_size = 42;
-      auto in_data = random_vector_gpu<uint8_t>(rng, sample_size * batch_size_);
+      auto in_data = random_vector<uint8_t>(rng, sample_size * batch_size_);
       std::vector<int64_t> shapes(batch_size_, sample_size);
       daliSetExternalInput(&h, "OP_TRACE_IN_GPU", device_type_t::GPU,
-                           thrust::raw_pointer_cast(in_data.data()), dali_data_type_t::DALI_UINT8,
+                           in_data.gpu().tensor_data(0), dali_data_type_t::DALI_UINT8,
                            shapes.data(), 1, nullptr, DALI_ext_default);
     }
 
-    daliPrefetchUniform(&h, prefetch_depth);
+    daliPrefetch(&h);
     for (int i = 0; i < prefetch_depth; i++) {
       daliShareOutput(&h);
 
-      for (const auto &operator_name : operator_under_test_names) {
-        EXPECT_EQ(daliHasOperatorTrace(&h, operator_name.c_str(), "this_trace_does_not_exist"), 0);
-        ASSERT_NE(daliHasOperatorTrace(&h, operator_name.c_str(), "test_trace"), 0);
+      for (size_t op = 0; op < std::size(operator_under_test_names); op++) {
+        const char *operator_name = operator_under_test_names[op];
+        const char *trace_name = operator_trace_names[op];
+        EXPECT_EQ(daliHasOperatorTrace(&h, operator_name, "this_trace_does_not_exist"), 0);
+        ASSERT_NE(daliHasOperatorTrace(&h, operator_name, trace_name), 0)
+          << "operator_name: " << operator_name << "\ntrace_name: " << trace_name;
 
-        EXPECT_EQ(std::string(daliGetOperatorTrace(&h, operator_name.c_str(), "test_trace")),
+        EXPECT_EQ(std::string(daliGetOperatorTrace(&h, operator_name, trace_name)),
                   make_string("test_value", iteration * prefetch_depth + i));
       }
 

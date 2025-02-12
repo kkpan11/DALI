@@ -1,4 +1,4 @@
-# Copyright (c) 2020-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2020-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -170,7 +170,7 @@ def _test_rrc(
     input = fn.external_source(
         source=generator(batch_size, max_frames, channel_dim, input_type), layout=layout
     )
-    shape = fn.shapes(input)
+    shape = input.shape()
     if device == "gpu":
         input = input.gpu()
     out = fn.random_resized_crop(
@@ -184,7 +184,6 @@ def _test_rrc(
         dtype=output_type,
     )
     pipe.set_outputs(out, shape)
-    pipe.build()
     for iter in range(3):
         outputs, input_shapes = pipe.run()
         if device == "gpu":

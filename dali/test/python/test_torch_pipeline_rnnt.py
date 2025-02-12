@@ -1,4 +1,4 @@
-# Copyright (c) 2020-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2020-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import nose_utils  # noqa:F401  - for Python 3.10
+from nose_utils import nottest
 import nvidia.dali.fn as fn
 from nvidia.dali import pipeline_def
 import nvidia.dali.types as types
@@ -23,7 +23,6 @@ import torch
 import math
 import random
 import os
-from nose.tools import nottest
 
 # Filtering librispeech samples
 audio_files = get_files("db/audio/wav", "wav")
@@ -198,7 +197,6 @@ class FilterbankFeatures:
 
 
 def dali_run(pipe, device):
-    pipe.build()
     outs = pipe.run()
     return to_array(outs[0])[0]
 
@@ -250,7 +248,7 @@ def torch_mel_fbank(spectrogram, sample_rate, device="cpu", nfilt=64, lowfreq=0,
         spectrogram = spectrogram.cuda()
     n_fft = 2 * (spectrogram.shape[0] - 1)
     filterbanks = torch.tensor(
-        librosa.filters.mel(sample_rate, n_fft, n_mels=nfilt, fmin=lowfreq, fmax=highfreq),
+        librosa.filters.mel(sr=sample_rate, n_fft=n_fft, n_mels=nfilt, fmin=lowfreq, fmax=highfreq),
         dtype=torch.float,
     )
     if device == "gpu":
@@ -332,7 +330,7 @@ def dali_reflect_pad_graph(x, pad_amount):
     return x
 
 
-@pipeline_def(batch_size=1, device_id=0, num_threads=3)
+@pipeline_def(batch_size=1, device_id=0, num_threads=4, exec_dynamic=True)
 def rnnt_train_pipe(
     files,
     sample_rate,
@@ -362,7 +360,7 @@ def rnnt_train_pipe(
     audio, _ = fn.decoders.audio(data, dtype=types.FLOAT, downmix=True)
 
     # splicing with subsampling doesn't work if audio_len is a GPU data node
-    if device == "gpu" and frame_splicing_subsample == 1:
+    if device == "gpu":
         audio = audio.gpu()
 
     # Speed perturbation 0.85x - 1.15x
@@ -375,12 +373,8 @@ def rnnt_train_pipe(
         begin, length = fn.nonsilent_region(audio, cutoff_db=-80)
         audio = audio[begin : begin + length]
 
-    audio_shape = fn.shapes(audio, dtype=types.INT32)
+    audio_shape = audio.shape(dtype=types.INT32)
     orig_audio_len = audio_shape[0]
-
-    # If we couldn't move to GPU earlier, do it now
-    if device == "gpu" and frame_splicing_subsample > 1:
-        audio = audio.gpu()
 
     if pad_amount > 0:
         audio_len = orig_audio_len + 2 * pad_amount
@@ -393,7 +387,6 @@ def rnnt_train_pipe(
     preemph_audio = fn.preemphasis_filter(padded_audio, preemph_coeff=preemph_coeff, border="zero")
 
     # Spectrogram
-    spec_len = audio_len // win_hop + 1
     spec = fn.spectrogram(
         preemph_audio,
         nfft=nfft,
@@ -415,6 +408,7 @@ def rnnt_train_pipe(
 
     # Frame splicing
     if frame_splicing_stack > 1 or frame_splicing_subsample > 1:
+        spec_len = audio_len // win_hop + 1
         log_features_spliced = dali_frame_splicing_graph(
             log_features,
             nfeatures,
@@ -523,7 +517,6 @@ def _testimpl_rnnt_data_pipeline(
         seed=42,
         batch_size=batch_size,
     )
-    pipe.build()
     nbatches = (nrecordings + batch_size - 1) // batch_size
     i = 0
     for b in range(nbatches):
@@ -672,7 +665,6 @@ def test_rnnt_data_pipeline_throughput(
         seed=42,
         batch_size=batch_size,
     )
-    pipe.build()
 
     import time
     from test_utils import AverageMeter

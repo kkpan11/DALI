@@ -1,4 +1,4 @@
-# Copyright (c) 2021-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2021-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,9 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from distutils.version import LooseVersion
+from packaging.version import Version
 
-from nvidia.dali import backend as _b
 from nvidia.dali.pipeline import Pipeline
 from nvidia.dali.data_node import DataNode as _DataNode
 from nvidia.dali import ops
@@ -26,6 +25,7 @@ import numba as nb
 
 
 _to_numpy = {
+    dali_types.BOOL: "bool_",
     dali_types.UINT8: "uint8",
     dali_types.UINT16: "uint16",
     dali_types.UINT32: "uint32",
@@ -40,6 +40,7 @@ _to_numpy = {
 }
 
 _to_numba = {
+    dali_types.BOOL: numba_types.boolean,
     dali_types.UINT8: numba_types.uint8,
     dali_types.UINT16: numba_types.uint16,
     dali_types.UINT32: numba_types.uint32,
@@ -56,8 +57,8 @@ _to_numba = {
 
 # Minimal version of Numba that is required for Numba GPU operator to work
 minimal_numba_version = {
-    11: LooseVersion("0.55.2"),
-    12: LooseVersion("0.57.0"),
+    11: Version("0.55.2"),
+    12: Version("0.57.0"),
 }
 
 
@@ -86,8 +87,9 @@ def _get_shape_view(shapes_ptr, ndims_ptr, num_dims, num_samples):
     return ret
 
 
-class NumbaFunction(metaclass=ops._DaliOperatorMeta):
-    schema_name = "NumbaFunction"
+class NumbaFunction(
+    ops.python_op_factory("NumbaFunctionBase", "NumbaFunction", "NumbaFuncImpl", generated=False)
+):
     _impl_module = "nvidia.dali.plugin.numba"
     ops.register_cpu_op("NumbaFunction")
     ops.register_gpu_op("NumbaFunction")
@@ -141,11 +143,11 @@ class NumbaFunction(metaclass=ops._DaliOperatorMeta):
             eval_string += "shape[{}]".format(i)
             eval_string += ", " if i + 1 != ndim else "), "
         eval_string += "dtype=np.{})".format(_to_numpy[dtype])
-        return njit(eval(eval_string))
+        return njit(eval(eval_string))  # nosec B307
 
     def _get_carrays_eval_lambda(self, types, ndim):
         ret = [self._get_carray_eval_lambda(dtype, ndim) for dtype, ndim in zip(types, ndim)]
-        ret += [njit(eval(("lambda x, y: None"))) for i in range(6 - len(types))]
+        ret += [njit(eval(("lambda x, y: None"))) for i in range(6 - len(types))]  # nosec B307
         return tuple(ret)
 
     def _get_run_fn_lambda(self, num_outs, num_ins):
@@ -160,7 +162,7 @@ class NumbaFunction(metaclass=ops._DaliOperatorMeta):
         for i in range(num_ins):
             eval_string += "in{}".format(i)
             eval_string += ", " if i + 1 != num_ins else ")"
-        return njit(eval(eval_string))
+        return njit(eval(eval_string))  # nosec B307
 
     def _get_setup_fn_cpu(self, setup_fn):
         setup_fn_address = None
@@ -194,7 +196,7 @@ class NumbaFunction(metaclass=ops._DaliOperatorMeta):
         for dali_type, ndim in zip(types, dims):
             cuda_arguments.append(numba_types.Array(_to_numba[dali_type], ndim, "C"))
 
-        if LooseVersion(nb.__version__) < LooseVersion("0.57.0"):
+        if Version(nb.__version__) < Version("0.57.0"):
             cres = cuda.compiler.compile_cuda(run_fn, numba_types.void, cuda_arguments)
         else:
             pipeline = Pipeline.current()
@@ -208,7 +210,7 @@ class NumbaFunction(metaclass=ops._DaliOperatorMeta):
         code = run_fn.__code__
         filename = code.co_filename
         linenum = code.co_firstlineno
-        if LooseVersion(nb.__version__) < LooseVersion("0.57.0"):
+        if Version(nb.__version__) < Version("0.57.0"):
             nvvm_options["debug"] = False
             nvvm_options["lineinfo"] = False
             lib, _ = tgt_ctx.prepare_cuda_kernel(
@@ -386,11 +388,9 @@ class NumbaFunction(metaclass=ops._DaliOperatorMeta):
 
     def __call__(self, *inputs, **kwargs):
         pipeline = Pipeline.current()
+        inputs = ops._preprocess_inputs(inputs, self.__class__.__name__, self._device, None)
         if pipeline is None:
-            Pipeline._raise_no_current_pipeline("NumbaFunction")
-        inputs = ops._preprocess_inputs(inputs, self._impl_name, self._device, None)
-        if pipeline is None:
-            Pipeline._raise_pipeline_required("NumbaFunction operator")
+            Pipeline._raise_pipeline_required(self.__class__.__name__)
         for inp in inputs:
             if not isinstance(inp, _DataNode):
                 raise TypeError(
@@ -400,8 +400,7 @@ class NumbaFunction(metaclass=ops._DaliOperatorMeta):
                     ).format(type(inp).__name__)
                 )
 
-        args, arg_inputs = ops._separate_kwargs(kwargs)
-        args.update(
+        kwargs.update(
             {
                 "run_fn": self.run_fn,
                 "out_types": self.out_types,
@@ -412,23 +411,16 @@ class NumbaFunction(metaclass=ops._DaliOperatorMeta):
             }
         )
         if self.setup_fn is not None:
-            args.update({"setup_fn": self.setup_fn})
+            kwargs.update({"setup_fn": self.setup_fn})
         if self.device == "gpu":
-            args.update(
+            kwargs.update(
                 {
                     "blocks": self.blocks,
                     "threads_per_block": self.threads_per_block,
                 }
             )
 
-        args = ops._resolve_double_definitions(args, self._init_args, keep_old=False)
-        if self._name is not None:
-            args = ops._resolve_double_definitions(args, {"name": self._name})  # restore the name
-
-        op_instance = ops._OperatorInstance(inputs, arg_inputs, args, self._init_args, self)
-        op_instance.spec.AddArg("device", self.device)
-
-        return op_instance.unwrapped_outputs
+        return super().__call__(*inputs, **kwargs)
 
     def __init__(
         self,
@@ -496,16 +488,7 @@ class NumbaFunction(metaclass=ops._DaliOperatorMeta):
         if not isinstance(in_types, list):
             in_types = [in_types]
 
-        self._impl_name = "NumbaFuncImpl"
-        self._schema = _b.GetSchema(self._impl_name)
-        self._spec = _b.OpSpec(self._impl_name)
-        self._device = device
-
-        self._init_args, self._call_args = ops._separate_kwargs(kwargs)
-        self._name = self._init_args.pop("name", None)
-
-        for key, value in self._init_args.items():
-            self._spec.AddArg(key, value)
+        super().__init__(device=device, **kwargs)
 
         if device == "gpu":
             self.run_fn = self._get_run_fn_gpu(run_fn, out_types + in_types, outs_ndim + ins_ndim)
@@ -526,7 +509,7 @@ class NumbaFunction(metaclass=ops._DaliOperatorMeta):
 
     @staticmethod
     def _check_minimal_numba_version(throw: bool = True):
-        current_version = LooseVersion(nb.__version__)
+        current_version = Version(nb.__version__)
         toolkit_version = cuda.runtime.get_version()
         if toolkit_version[0] not in minimal_numba_version:
             if throw:
@@ -539,7 +522,7 @@ class NumbaFunction(metaclass=ops._DaliOperatorMeta):
                 raise RuntimeError(
                     f"Insufficient Numba version. Numba GPU operator "
                     f"requires Numba {str(min_ver)} or higher. "
-                    f"Detected version: {str(LooseVersion(nb.__version__))}."
+                    f"Detected version: {str(Version(nb.__version__))}."
                 )
             else:
                 return False
