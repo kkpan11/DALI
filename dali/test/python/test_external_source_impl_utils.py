@@ -1,4 +1,4 @@
-# Copyright (c) 2021-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2021-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,9 +15,7 @@
 from nvidia.dali._utils import external_source_impl
 from nvidia.dali import tensors, pipeline_def
 import nvidia.dali.fn as fn
-from nose.tools import assert_equals
-from nose_utils import raises
-from nose.plugins.attrib import attr
+from nose_utils import raises, assert_equals, attr
 import numpy as np
 
 
@@ -58,7 +56,6 @@ def non_uniform_tl():
         return fn.external_source(source=get_samples)
 
     p = pipe()
-    p.build()
     return p.run()[0]
 
 

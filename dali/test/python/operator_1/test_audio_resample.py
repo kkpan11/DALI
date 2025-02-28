@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -46,13 +46,12 @@ def audio_decoder_pipe(device):
         audio0 = audio0.gpu()
     audio2 = fn.audio_resample(audio0, in_rate=sr0, out_rate=out_sr)
     audio3 = fn.audio_resample(audio0, scale=out_sr / sr0)
-    audio4 = fn.audio_resample(audio0, out_length=fn.shapes(audio1)[0])
+    audio4 = fn.audio_resample(audio0, out_length=audio1.shape()[0])
     return audio1, audio2, audio3, audio4
 
 
 def _test_standalone_vs_fused(device):
     pipe = audio_decoder_pipe(device=device, batch_size=2, num_threads=1, device_id=0)
-    pipe.build()
     is_gpu = device == "gpu"
     for _ in range(2):
         outs = pipe.run()
@@ -83,7 +82,6 @@ def _test_type_conversion(device, src_type, in_values, dst_type, out_values, eps
         return fn.audio_resample(input, dtype=dst_type, scale=1, quality=0)
 
     pipe = test_pipe(device, device_id=0, num_threads=4)
-    pipe.build()
     for _ in range(2):
         (out,) = pipe.run()
         assert len(out) == len(out_values)
@@ -96,7 +94,7 @@ def _test_type_conversion(device, src_type, in_values, dst_type, out_values, eps
                 print(out_arr.dtype, out_arr.shape)
                 print("Reference: ", ref)
                 print(ref.dtype, ref.shape)
-                print("Diff: ", out_arr.astype(np.float) - ref)
+                print("Diff: ", out_arr.astype(float) - ref)
                 assert np.allclose(out_arr, ref, 1e-6, eps)
 
 

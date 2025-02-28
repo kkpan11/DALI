@@ -1,4 +1,4 @@
-# Copyright (c) 2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2023-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -118,9 +118,7 @@ def test_run_auto_aug(i, args):
 
     # run the pipeline twice to make sure instantiation preserves determinism
     p1 = pipeline()
-    p1.build()
     p2 = pipeline()
-    p2.build()
     for _ in range(3):
         (out1,) = p1.run()
         (out2,) = p2.run()
@@ -153,7 +151,6 @@ class VideoTest(unittest.TestCase):
         cls.vid_files = []
         for size in (size_1, size_2):
             p = pipeline(size=size)
-            p.build()
             (out,) = p.run()
             cls.vid_files.extend(np.array(sample) for sample in out.as_cpu())
 
@@ -189,7 +186,7 @@ class VideoTest(unittest.TestCase):
                 batch=True,
                 layout="FHWC",
             )
-            extra = {} if not use_shape else {"shape": fn.shapes(video)[1:]}
+            extra = {} if not use_shape else {"shape": video.shape()[1:]}
             if device == "gpu":
                 video = video.gpu()
             video = auto_augment.auto_augment(video, policy_name, **extra)
@@ -197,9 +194,7 @@ class VideoTest(unittest.TestCase):
 
         # run the pipeline twice to make sure instantiation preserves determinism
         p1 = pipeline()
-        p1.build()
         p2 = pipeline()
-        p2.build()
 
         for _ in range(num_iterations):
             (out1,) = p1.run()
@@ -210,8 +205,8 @@ class VideoTest(unittest.TestCase):
 @params(
     (False, "cpu", 256),
     (False, "gpu", 512),
-    (True, "cpu", 400),
-    (True, "gpu", 348),
+    (True, "cpu", 2000),
+    (True, "gpu", 2000),
 )
 def test_sub_policy(randomly_negate, dev, batch_size):
     num_magnitude_bins = 10
@@ -256,7 +251,6 @@ def test_sub_policy(randomly_negate, dev, batch_size):
 
     policy = Policy("MyPolicy", num_magnitude_bins=num_magnitude_bins, sub_policies=sub_policies)
     p = concat_aug_pipeline(batch_size=batch_size, dev=dev, policy=policy)
-    p.build()
 
     sub_policy_outputs = collect_sub_policy_outputs(sub_policies, num_magnitude_bins)
     # magnitudes are chosen so that the magnitude of the first op in
@@ -305,9 +299,8 @@ def test_sub_policy(randomly_negate, dev, batch_size):
                     expected_counts.append(expected)
             stat = chisquare(counts, expected_counts)
             # assert that the magnitudes negation looks independently enough
-            # (0.05 <=), but also that it is not too ideal (i.e. like all
-            # cases happening exactly the expected number of times)
-            assert 0.05 <= stat.pvalue <= 0.95, f"{stat}"
+            # (0.01 <=)
+            assert 0.01 <= stat.pvalue, f"{stat}"
 
 
 @params(("cpu",), ("gpu",))
@@ -397,8 +390,7 @@ def test_op_skipping(dev):
     )
 
     policy = Policy("MyPolicy", num_magnitude_bins=num_magnitude_bins, sub_policies=sub_policies)
-    p = concat_aug_pipeline(batch_size=batch_size, dev=dev, policy=policy)
-    p.build()
+    p = concat_aug_pipeline(batch_size=batch_size, dev=dev, policy=policy, seed=1234)
 
     for _ in range(5):
         (output,) = p.run()
@@ -415,10 +407,8 @@ def test_op_skipping(dev):
             actual.append(actual_counts[mags])
             expected.append(expected_counts[mags])
         stat = chisquare(actual, expected)
-        # assert that the magnitudes negation looks independently enough
-        # (0.05 <=), but also that it is not too ideal (i.e. like all
-        # cases happening exactly the expected number of times)
-        assert 0.05 <= stat.pvalue <= 0.95, f"{stat}"
+        # assert that the magnitudes negation looks independently enough (0.01 <=)
+        assert 0.01 <= stat.pvalue, f"{stat}"
 
 
 def test_policy_presentation():

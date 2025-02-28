@@ -21,7 +21,7 @@
 #include "dali/core/device_guard.h"
 #include "dali/core/dynlink_cuda.h"
 #include "dali/core/error_handling.h"
-#include "dali/operators/reader/loader/video/frames_decoder.h"
+#include "dali/operators/reader/loader/video/frames_decoder_cpu.h"
 #include "dali/operators/reader/loader/video/frames_decoder_gpu.h"
 #include "dali/operators/reader/loader/video/video_test_base.h"
 #include "dali/test/dali_test_config.h"
@@ -32,7 +32,7 @@ namespace dali {
 class FramesDecoderTestBase : public VideoTestBase {
  public:
   virtual void RunSequentialForwardTest(
-    FramesDecoder &decoder, TestVideo &ground_truth, double eps = 1.0) {
+    FramesDecoderBase &decoder, TestVideo &ground_truth, double eps = 1.0) {
     // Iterate through the whole video in order
     for (int i = 0; i < decoder.NumFrames(); ++i) {
       ASSERT_EQ(decoder.NextFrameIdx(), i);
@@ -44,7 +44,7 @@ class FramesDecoderTestBase : public VideoTestBase {
   }
 
   virtual void RunSequentialTest(
-    FramesDecoder &decoder, TestVideo &ground_truth, double eps = 1.0) {
+    FramesDecoderBase &decoder, TestVideo &ground_truth, double eps = 1.0) {
     // Iterate through the whole video in order
     RunSequentialForwardTest(decoder, ground_truth, eps);
 
@@ -53,12 +53,15 @@ class FramesDecoderTestBase : public VideoTestBase {
     RunSequentialForwardTest(decoder, ground_truth, eps);
   }
 
-  virtual void RunTest(FramesDecoder &decoder, TestVideo &ground_truth, double eps = 1.0) {
+  virtual void RunTest(FramesDecoderBase &decoder, TestVideo &ground_truth, bool has_index = true,
+                       double eps = 1.0) {
     ASSERT_EQ(decoder.Height(), ground_truth.Height());
     ASSERT_EQ(decoder.Width(), ground_truth.Width());
     ASSERT_EQ(decoder.Channels(), ground_truth.NumChannels());
     ASSERT_EQ(decoder.NumFrames(), ground_truth.NumFrames());
-    ASSERT_EQ(decoder.IsVfr(), ground_truth.IsVfr());
+    if (has_index) {
+      ASSERT_EQ(decoder.IsVfr(), ground_truth.IsVfr());
+    }
 
     RunSequentialTest(decoder, ground_truth, eps);
     decoder.Reset();
@@ -117,13 +120,14 @@ class FramesDecoderTestBase : public VideoTestBase {
 class FramesDecoderTest_CpuOnlyTests : public FramesDecoderTestBase {
  public:
   // due to difference in CPU postprocessing on different CPUs eps is 10
-  void RunSequentialTest(FramesDecoder &decoder, TestVideo &ground_truth, double eps = 10.) {
+  void RunSequentialTest(FramesDecoderBase &decoder, TestVideo &ground_truth, double eps = 10.) {
     FramesDecoderTestBase::RunSequentialTest(decoder, ground_truth, eps);
   }
 
   // due to difference in CPU postprocessing on different CPUs eps is 10
-  void RunTest(FramesDecoder &decoder, TestVideo &ground_truth, double eps = 10.0) {
-    FramesDecoderTestBase::RunTest(decoder, ground_truth, eps);
+  void RunTest(FramesDecoderBase &decoder, TestVideo &ground_truth, bool has_index = true,
+               double eps = 10.0) {
+    FramesDecoderTestBase::RunTest(decoder, ground_truth, has_index, eps);
   }
 
   void AssertFrame(uint8_t *frame, int index, TestVideo& ground_truth, double eps = 1.0) override {
@@ -140,7 +144,7 @@ class FramesDecoderTest_CpuOnlyTests : public FramesDecoderTestBase {
 
   void RunConstructorFailureTest(std::string path, std::string expected_error) {
     RunFailureTest([&]() -> void {
-      FramesDecoder decoder(path);},
+      FramesDecoderCpu decoder(path);},
       expected_error);
   }
 
@@ -156,12 +160,13 @@ class FramesDecoderGpuTest : public FramesDecoderTestBase {
     CUDA_CALL(cudaDeviceSynchronize());
   }
 
-  void RunSequentialTest(FramesDecoder &decoder, TestVideo &ground_truth, double eps = 1.5) {
+  void RunSequentialTest(FramesDecoderBase &decoder, TestVideo &ground_truth, double eps = 1.5) {
     FramesDecoderTestBase::RunSequentialTest(decoder, ground_truth, eps);
   }
 
-  void RunTest(FramesDecoder &decoder, TestVideo &ground_truth, double eps = 1.5) {
-    FramesDecoderTestBase::RunTest(decoder, ground_truth, eps);
+  void RunTest(FramesDecoderBase &decoder, TestVideo &ground_truth, bool has_index = true,
+               double eps = 1.5) {
+    FramesDecoderTestBase::RunTest(decoder, ground_truth, has_index, eps);
   }
 
   void AssertFrame(uint8_t *frame, int index, TestVideo& ground_truth, double eps = 1.0) override {
@@ -189,28 +194,27 @@ class FramesDecoderGpuTest : public FramesDecoderTestBase {
 
 
 TEST_F(FramesDecoderTest_CpuOnlyTests, ConstantFrameRate) {
-  FramesDecoder decoder(cfr_videos_paths_[0]);
+  FramesDecoderCpu decoder(cfr_videos_paths_[0]);
   RunTest(decoder, cfr_videos_[0]);
 }
 
 TEST_F(FramesDecoderTest_CpuOnlyTests, ConstantFrameRateHevc) {
-  FramesDecoder decoder(cfr_hevc_videos_paths_[0]);
+  FramesDecoderCpu decoder(cfr_hevc_videos_paths_[0]);
   RunTest(decoder, cfr_videos_[0]);
 }
 
 TEST_F(FramesDecoderTest_CpuOnlyTests, VariableFrameRate) {
-  FramesDecoder decoder(vfr_videos_paths_[1]);
+  FramesDecoderCpu decoder(vfr_videos_paths_[1]);
   RunTest(decoder, vfr_videos_[1]);
 }
 
 TEST_F(FramesDecoderTest_CpuOnlyTests, VariableFrameRateHevc) {
-  FramesDecoder decoder(vfr_hevc_videos_paths_[0]);
+  FramesDecoderCpu decoder(vfr_hevc_videos_paths_[0]);
   RunTest(decoder, vfr_hevc_videos_[0]);
 }
 
 TEST_F(FramesDecoderTest_CpuOnlyTests, InvalidSeek) {
-  FramesDecoder decoder(cfr_videos_paths_[0]);
-
+  FramesDecoderCpu decoder(cfr_videos_paths_[0]);
   RunFailureTest([&]() -> void {
     decoder.SeekFrame(60);},
     "Invalid seek frame id. frame_id = 60, num_frames = 50");
@@ -230,7 +234,6 @@ TEST_F(FramesDecoderGpuTest, ConstantFrameRateHevc) {
   if (!FramesDecoderGpu::SupportsHevc()) {
     GTEST_SKIP();
   }
-
   FramesDecoderGpu decoder(cfr_hevc_videos_paths_[0]);
   RunTest(decoder, cfr_videos_[0]);
 }
@@ -239,43 +242,37 @@ TEST_F(FramesDecoderGpuTest, VariableFrameRateHevc) {
   if (!FramesDecoderGpu::SupportsHevc()) {
     GTEST_SKIP();
   }
-
   FramesDecoderGpu decoder(vfr_hevc_videos_paths_[1]);
   RunTest(decoder, vfr_hevc_videos_[1]);
 }
 
 TEST_F(FramesDecoderTest_CpuOnlyTests, InMemoryCfrVideo) {
   auto memory_video = MemoryVideo(cfr_videos_paths_[1]);
-
-  FramesDecoder decoder(memory_video.data(), memory_video.size());
+  FramesDecoderCpu decoder(memory_video.data(), memory_video.size());
   RunTest(decoder, cfr_videos_[1]);
 }
 
 TEST_F(FramesDecoderGpuTest, InMemoryCfrVideo) {
   auto memory_video = MemoryVideo(cfr_videos_paths_[0]);
-
   FramesDecoderGpu decoder(memory_video.data(), memory_video.size());
   RunTest(decoder, cfr_videos_[0]);
 }
 
 TEST_F(FramesDecoderTest_CpuOnlyTests, InMemoryVfrVideo) {
   auto memory_video = MemoryVideo(vfr_videos_paths_[1]);
-
-  FramesDecoder decoder(memory_video.data(), memory_video.size());
+  FramesDecoderCpu decoder(memory_video.data(), memory_video.size());
   RunTest(decoder, vfr_videos_[1]);
 }
 
 TEST_F(FramesDecoderGpuTest, InMemoryVfrVideo) {
   auto memory_video = MemoryVideo(vfr_videos_paths_[0]);
-
   FramesDecoderGpu decoder(memory_video.data(), memory_video.size());
   RunTest(decoder, vfr_videos_[0]);
 }
 
 TEST_F(FramesDecoderTest_CpuOnlyTests, InMemoryVfrHevcVideo) {
   auto memory_video = MemoryVideo(vfr_videos_paths_[0]);
-
-  FramesDecoder decoder(memory_video.data(), memory_video.size());
+  FramesDecoderCpu decoder(memory_video.data(), memory_video.size());
   RunTest(decoder, vfr_videos_[0]);
 }
 
@@ -284,40 +281,32 @@ TEST_F(FramesDecoderGpuTest, InMemoryVfrHevcVideo) {
     GTEST_SKIP();
   }
   auto memory_video = MemoryVideo(vfr_hevc_videos_paths_[1]);
-
   FramesDecoderGpu decoder(memory_video.data(), memory_video.size());
   RunTest(decoder, vfr_hevc_videos_[1]);
 }
 
 TEST_F(FramesDecoderTest_CpuOnlyTests, VariableFrameRateNoIndex) {
   auto memory_video = MemoryVideo(vfr_videos_paths_[0]);
-
-  FramesDecoder decoder(memory_video.data(), memory_video.size(), false);
-  RunSequentialTest(decoder, vfr_videos_[0]);
+  FramesDecoderCpu decoder(memory_video.data(), memory_video.size(), false);
+  RunTest(decoder, vfr_videos_[0], false);
 }
 
 TEST_F(FramesDecoderTest_CpuOnlyTests, VariableFrameRateHevcNoIndex) {
   auto memory_video = MemoryVideo(vfr_hevc_videos_paths_[1]);
-
-  FramesDecoder decoder(memory_video.data(), memory_video.size(), false);
-  RunSequentialTest(decoder, vfr_hevc_videos_[1]);
+  FramesDecoderCpu decoder(memory_video.data(), memory_video.size(), false);
+  RunTest(decoder, vfr_hevc_videos_[1], false);
 }
 
 TEST_F(FramesDecoderTest_CpuOnlyTests, NoIndexSeek) {
   auto memory_video = MemoryVideo(vfr_videos_paths_[0]);
-
-  FramesDecoder decoder(memory_video.data(), memory_video.size(), false);
-
-  RunFailureTest([&]() -> void {
-    decoder.SeekFrame(10);},
-    "Functionality is unavailible when index is not built.");
+  FramesDecoderCpu decoder(memory_video.data(), memory_video.size(), false);
+  RunTest(decoder, vfr_videos_[0], false);
 }
 
 TEST_F(FramesDecoderGpuTest, VariableFrameRateNoIndex) {
   auto memory_video = MemoryVideo(vfr_videos_paths_[0]);
-
   FramesDecoderGpu decoder(memory_video.data(), memory_video.size(), 0, false);
-  RunSequentialTest(decoder, vfr_videos_[0]);
+  RunTest(decoder, vfr_videos_[0], false);
 }
 
 TEST_F(FramesDecoderGpuTest, VariableFrameRateHevcNoIndex) {
@@ -325,67 +314,58 @@ TEST_F(FramesDecoderGpuTest, VariableFrameRateHevcNoIndex) {
     GTEST_SKIP();
   }
   auto memory_video = MemoryVideo(vfr_hevc_videos_paths_[1]);
-
   FramesDecoderGpu decoder(memory_video.data(), memory_video.size(), 0, false);
-  RunSequentialTest(decoder, vfr_hevc_videos_[1]);
+  RunTest(decoder, vfr_hevc_videos_[1], false);
 }
 
 TEST_F(FramesDecoderGpuTest, CfrFrameRateMpeg4NoIndex) {
   auto memory_video = MemoryVideo(cfr_mpeg4_videos_paths_[0]);
-
   FramesDecoderGpu decoder(memory_video.data(), memory_video.size(), 0, false);
-  RunSequentialTest(decoder, cfr_videos_[0], 3.0);
+  RunTest(decoder, cfr_videos_[0], false, 3.0);
 }
 
 TEST_F(FramesDecoderGpuTest, VfrFrameRateMpeg4NoIndex) {
   auto memory_video = MemoryVideo(vfr_mpeg4_videos_paths_[0]);
-
   FramesDecoderGpu decoder(memory_video.data(), memory_video.size(), 0, false);
-  RunSequentialTest(decoder, vfr_videos_[0], 3.0);
+  RunTest(decoder, vfr_videos_[0], false, 3.0);
 }
 
 TEST_F(FramesDecoderGpuTest, CfrFrameRateMpeg4MkvNoIndex) {
   auto memory_video = MemoryVideo(cfr_mpeg4_mkv_videos_paths_[0]);
-
   FramesDecoderGpu decoder(
     memory_video.data(), memory_video.size(), 0, false, cfr_videos_[0].NumFrames());
-  RunSequentialTest(decoder, cfr_videos_[0], 3.0);
+  RunTest(decoder, cfr_videos_[0], false, 3.0);
 }
 
 TEST_F(FramesDecoderGpuTest, CfrFrameRateMpeg4MkvNoIndexNoFrameNum) {
   auto memory_video = MemoryVideo(cfr_mpeg4_mkv_videos_paths_[0]);
-
   FramesDecoderGpu decoder(memory_video.data(), memory_video.size(), 0, false);
-  RunSequentialTest(decoder, cfr_videos_[0], 3.0);
+  RunTest(decoder, cfr_videos_[0], false, 3.0);
 }
 
 TEST_F(FramesDecoderGpuTest, VfrFrameRateMpeg4MkvNoIndex) {
   auto memory_video = MemoryVideo(vfr_mpeg4_mkv_videos_paths_[1]);
-
   FramesDecoderGpu decoder(
     memory_video.data(), memory_video.size(), 0, false, vfr_videos_[1].NumFrames());
-  RunSequentialTest(decoder, vfr_videos_[1], 3.0);
+  RunTest(decoder, vfr_videos_[1], false, 3.0);
 }
 
 TEST_F(FramesDecoderGpuTest, VfrFrameRateMpeg4MkvNoIndexNoFrameNum) {
   auto memory_video = MemoryVideo(vfr_mpeg4_mkv_videos_paths_[1]);
-
   FramesDecoderGpu decoder(memory_video.data(), memory_video.size(), 0, false);
-  RunSequentialTest(decoder, vfr_videos_[1], 3.0);
+  RunTest(decoder, vfr_videos_[1], false, 3.0);
 }
 
 TEST_F(FramesDecoderGpuTest, RawH264) {
   auto memory_video = MemoryVideo(cfr_raw_h264_videos_paths_[1]);
-
   FramesDecoderGpu decoder(memory_video.data(), memory_video.size(), 0, false);
-  RunSequentialForwardTest(decoder, cfr_videos_[1], 1.5);
+  RunTest(decoder, cfr_videos_[1], false, 1.5);
 }
 
 TEST_F(FramesDecoderGpuTest, RawH265) {
   auto memory_video = MemoryVideo(cfr_raw_h264_videos_paths_[0]);
-
   FramesDecoderGpu decoder(memory_video.data(), memory_video.size(), 0, false);
-  RunSequentialForwardTest(decoder, cfr_videos_[0], 1.5);
+  RunTest(decoder, cfr_videos_[0], false, 1.5);
 }
 
 }  // namespace dali

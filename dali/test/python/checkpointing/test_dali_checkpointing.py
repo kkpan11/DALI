@@ -1,4 +1,4 @@
-# Copyright (c) 2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2023-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -27,9 +27,8 @@ from test_utils import (
     get_dali_extra_path,
     module_functions,
 )
-from nose_utils import assert_warns
+from nose_utils import assert_warns, assert_raises, attr
 from nose2.tools import params, cartesian_params
-from nose.plugins.attrib import attr
 from dataclasses import dataclass
 from nvidia.dali import tfrecord as tfrec
 from nvidia.dali.auto_aug import auto_augment as aa
@@ -73,7 +72,6 @@ def calculate_iterations_in_epoch(pipe, batch_size, num_shards=1):
 
 def check_pipeline_checkpointing_native(pipeline_factory):
     pipe = pipeline_factory(**pipeline_args)
-    pipe.build()
 
     iterations_in_epoch = calculate_iterations_in_epoch(pipe, pipeline_args["batch_size"])
     for _ in range(warmup_epochs * iterations_in_epoch):
@@ -81,29 +79,6 @@ def check_pipeline_checkpointing_native(pipeline_factory):
 
     restored = pipeline_factory(**pipeline_args, checkpoint=pipe.checkpoint())
     compare_pipelines(pipe, restored, pipeline_args["batch_size"], comparsion_iterations)
-
-
-def check_pipeline_checkpointing_pytorch(pipeline_factory, reader_name=None, size=-1):
-    from nvidia.dali.plugin.pytorch import DALIGenericIterator
-
-    pipe = pipeline_factory(**pipeline_args)
-    pipe.build()
-
-    iter = DALIGenericIterator(pipe, ["data"], auto_reset=True, reader_name=reader_name, size=size)
-    for _ in range(warmup_epochs):
-        for _ in iter:
-            pass
-
-    restored = pipeline_factory(**pipeline_args, checkpoint=iter.checkpoints()[0])
-    restored.build()
-    iter2 = DALIGenericIterator(
-        restored, ["data"], auto_reset=True, reader_name=reader_name, size=size
-    )
-
-    for out1, out2 in zip(iter, iter2):
-        for d1, d2 in zip(out1, out2):
-            for key in d1.keys():
-                assert (d1[key] == d2[key]).all()
 
 
 def check_single_input_operator_pipeline(op, device, **kwargs):
@@ -126,25 +101,12 @@ def check_single_input_operator(op, device, **kwargs):
     check_pipeline_checkpointing_native(pipeline_factory)
 
 
-def check_single_input_operator_pytorch(op, device, **kwargs):
-    pipeline_factory = check_single_input_operator_pipeline(op, device, **kwargs)
-    check_pipeline_checkpointing_pytorch(pipeline_factory, reader_name="Reader")
-
-
 def check_no_input_operator(op, device, **kwargs):
     @pipeline_def
     def pipeline_factory():
         return op(device=device, **kwargs)
 
     check_pipeline_checkpointing_native(pipeline_factory)
-
-
-def check_no_input_operator_pytorch(op, device, **kwargs):
-    @pipeline_def
-    def pipeline_factory():
-        return op(device=device, **kwargs)
-
-    check_pipeline_checkpointing_pytorch(pipeline_factory, size=8)
 
 
 # Readers section
@@ -160,7 +122,6 @@ def check_reader_checkpointing(reader, num_epochs, batch_size, iters_into_epoch,
             return result
 
     p = pipeline()
-    p.build()
 
     num_shards = kwargs.get("num_shards", 1)
 
@@ -179,7 +140,6 @@ def check_reader_checkpointing(reader, num_epochs, batch_size, iters_into_epoch,
                     break
 
     restored = pipeline(checkpoint=p.checkpoint())
-    restored.build()
 
     compare_pipelines(p, restored, batch_size, (num_shards + 1) * iterations_in_epoch)
 
@@ -668,68 +628,6 @@ def test_numpy_reader(
         )
 
 
-@attr("pytorch")
-@params(
-    (1, 3, 0, 1, True, False, False),
-    (5, 10, 0, 2, True, False, False),
-    (3, 64, 3, 4, False, False, False),
-    (0, 32, 1, 4, False, False, True),
-    (3, 64, 3, 4, False, False, True),
-    (1, 8, 0, 2, False, True, False),
-    (1, 8, 1, 2, False, True, False),
-    (1, 8, 3, 4, False, True, False),
-    (1, 3, 0, 1, True, False, False, 1),
-    (5, 10, 0, 2, True, False, False, 2),
-    (3, 64, 3, 4, False, False, True, 3),
-)
-def test_file_reader_pytorch(
-    num_epochs,
-    batch_size,
-    shard_id,
-    num_shards,
-    random_shuffle,
-    shuffle_after_epoch,
-    stick_to_shard,
-    iters_into_epoch=None,
-):
-    from nvidia.dali.plugin.pytorch import DALIGenericIterator
-
-    @pipeline_def(batch_size=batch_size, device_id=0, num_threads=4, enable_checkpointing=True)
-    def pipeline():
-        data, label = fn.readers.file(
-            name="Reader",
-            file_root=images_dir,
-            pad_last_batch=True,
-            random_shuffle=random_shuffle,
-            shard_id=shard_id,
-            num_shards=num_shards,
-            shuffle_after_epoch=shuffle_after_epoch,
-            stick_to_shard=stick_to_shard,
-        )
-        image = fn.decoders.image_random_crop(data, device="mixed")
-        image = fn.resize(image, size=(200, 200))
-        return image, label
-
-    p = pipeline()
-    p.build()
-
-    iter = DALIGenericIterator(p, ["data", "labels"], auto_reset=True, reader_name="Reader")
-    for epoch in range(num_epochs):
-        for i, _ in enumerate(iter):
-            if iters_into_epoch is not None:
-                if epoch == num_epochs - 1 and i == iters_into_epoch - 1:
-                    break
-
-    restored = pipeline(checkpoint=iter.checkpoints()[0])
-    restored.build()
-    iter2 = DALIGenericIterator(restored, ["data", "labels"], auto_reset=True, reader_name="Reader")
-
-    for out1, out2 in zip(iter, iter2):
-        for d1, d2 in zip(out1, out2):
-            for key in d1.keys():
-                assert (d1[key] == d2[key]).all()
-
-
 @params(0, 1, 2, 3, 4, 5, 6, 7, 8)
 def test_multiple_readers(num_iters):
     my_images = os.path.join(images_dir, "134")
@@ -754,13 +652,11 @@ def test_multiple_readers(num_iters):
         return (a + b) // 2
 
     p = pipeline()
-    p.build()
 
     for _ in range(num_iters):
         p.run()
 
     restored = pipeline(checkpoint=p.checkpoint())
-    restored.build()
 
     compare_pipelines(p, restored, 1, 20)
 
@@ -816,10 +712,7 @@ class VideoConfig:
 def test_video_reader(
     num_epochs, batch_size, iters_into_epoch, config: BaseDecoderConfig, video: VideoConfig
 ):
-    files = [
-        os.path.join(get_dali_extra_path(), f"db/video/multiple_framerate/{f}/{f}fps.mp4")
-        for f in (10, 50)
-    ]
+    files = [os.path.join(get_dali_extra_path(), f"db/video/small/small{i}.mp4") for i in range(5)]
 
     check_reader_checkpointing(
         fn.readers.video,
@@ -877,10 +770,7 @@ def test_video_reader(
 def test_video_reader_resize_reader(
     num_epochs, batch_size, iters_into_epoch, config: BaseDecoderConfig, video: VideoConfig
 ):
-    files = [
-        os.path.join(get_dali_extra_path(), f"db/video/multiple_framerate/{f}/{f}fps.mp4")
-        for f in (10, 50)
-    ]
+    files = [os.path.join(get_dali_extra_path(), f"db/video/small/small{i}.mp4") for i in range(5)]
 
     check_reader_checkpointing(
         fn.readers.video_resize,
@@ -963,16 +853,21 @@ def test_experimental_video_reader(
 # `check_single_input_operator`
 
 
+@params(*[lambda n: np.arange(n) / (n * (n - 1) / 2), lambda n: None])
+@random_signed_off("random.choice")
+def test_random_choice(p_dist):
+    @pipeline_def
+    def pipeline():
+        n = 10
+        return fn.random.choice(n, p=p_dist(n))
+
+    check_pipeline_checkpointing_native(pipeline)
+
+
 @cartesian_params(("cpu", "gpu"), (None, (1,), (10,)))
 @random_signed_off("random.coin_flip", "coin_flip")
 def test_random_coin_flip(device, shape):
     check_no_input_operator(fn.random.coin_flip, device, shape=shape)
-
-
-@attr("pytorch")
-@cartesian_params(("cpu", "gpu"), (None, (1,), (10,)))
-def test_random_coin_flip_pytorch(device, shape):
-    check_no_input_operator_pytorch(fn.random.coin_flip, device, shape=shape)
 
 
 @cartesian_params(("cpu",), (None, (1,), (10,)))
@@ -981,22 +876,16 @@ def test_random_normal(device, shape):
     check_no_input_operator(fn.random.normal, device, shape=shape)
 
 
-@attr("pytorch")
-@cartesian_params(("cpu", "gpu"), (None, (1,), (10,)))
-def test_random_normal_pytorch(device, shape):
-    check_no_input_operator_pytorch(fn.random.normal, device, shape=shape)
+@cartesian_params(("cpu",), (None, 100, (10, 50)))
+@random_signed_off("random.beta")
+def test_random_beta(device, shape):
+    check_no_input_operator(fn.random.beta, device, shape=shape)
 
 
 @cartesian_params(("cpu", "gpu"), (None, (1,), (10,)))
 @random_signed_off("random.uniform", "uniform")
 def test_random_uniform(device, shape):
     check_no_input_operator(fn.random.uniform, device, shape=shape)
-
-
-@attr("pytorch")
-@cartesian_params(("cpu", "gpu"), (None, (1,), (10,)))
-def test_random_uniform_pytorch(device, shape):
-    check_no_input_operator_pytorch(fn.random.uniform, device, shape=shape)
 
 
 @random_signed_off("segmentation.random_object_bbox")
@@ -1055,6 +944,17 @@ def test_random_bbox_crop():
     check_single_input_operator(wrapper, "cpu")
 
 
+@random_signed_off("random_crop_generator")
+def test_random_crop_generator():
+    @pipeline_def
+    def pipeline():
+        data = fn.random.uniform(shape=(2,), dtype=types.DALIDataType.INT64)
+        crop_anchor, crop_shape = fn.random_crop_generator(data)
+        return crop_anchor, crop_shape
+
+    check_pipeline_checkpointing_native(pipeline)
+
+
 @params("cpu", "gpu")
 @random_signed_off("noise.gaussian")
 def test_noise_gaussian(device):
@@ -1085,6 +985,20 @@ def test_image_random_crop(device):
     check_pipeline_checkpointing_native(pipeline)
 
 
+@params("cpu", "mixed")
+@random_signed_off(
+    "experimental.image_decoder_random_crop", "experimental.decoders.image_random_crop"
+)
+def test_experimental_image_random_crop(device):
+    @pipeline_def
+    def pipeline():
+        data, _ = fn.readers.file(name="Reader", file_root=images_dir)
+        image = fn.experimental.decoders.image_random_crop(data, device=device)
+        return image
+
+    check_pipeline_checkpointing_native(pipeline)
+
+
 # External source
 
 
@@ -1103,43 +1017,13 @@ def check_external_source_pipeline_checkpointing(pipeline_factory, iterations, c
             assert np.all(out1 == out2)
 
     p1 = pipeline_factory()
-    p1.build()
 
     for _ in range(iterations):
         run_and_reset(p1)
 
     cpt = p1.checkpoint()
     p2 = pipeline_factory(checkpoint=cpt)
-    p2.build()
     compare_external_source_pipelines(p1, p2, compare_iterations)
-
-
-def check_external_source_pipeline_checkpointing_pytorch(pipeline_factory, iterations, *, size=-1):
-    from nvidia.dali.plugin.pytorch import DALIGenericIterator
-
-    def run(iterator, iterations):
-        completed_iterations = 0
-        while completed_iterations < iterations:
-            for _ in iterator:
-                completed_iterations += 1
-                if completed_iterations == iterations:
-                    break
-
-    pipeline = pipeline_factory()
-    pipeline.build()
-
-    iter = DALIGenericIterator(pipeline, ["data"], auto_reset=True, size=size)
-
-    run(iter, iterations)
-
-    restored = pipeline_factory(checkpoint=iter.checkpoints()[0])
-    restored.build()
-    iter2 = DALIGenericIterator(restored, ["data"], auto_reset=True, size=size)
-
-    for out1, out2 in zip(iter, iter2):
-        for d1, d2 in zip(out1, out2):
-            for key in d1.keys():
-                assert (d1[key] == d2[key]).all()
 
 
 def make_external_source_test_pipeline_factory(source, mode, batch_size, parallel, **kwargs):
@@ -1194,6 +1078,7 @@ def make_dummy_source(epoch_size, batch_size, mode):
     return src
 
 
+@attr("sanitizer_skip")
 @cartesian_params(
     ((1, 1), (3, 4)),  # (epoch size, batch size)
     (0, 3, 15),  # test iterations
@@ -1208,37 +1093,23 @@ def test_external_source_checkpointing(dataset_info, iterations, mode, parallel)
     check_external_source_pipeline_checkpointing(pf, iterations, 2 * epoch_size)
 
 
-@attr("pytorch")
-@cartesian_params(
-    ((1, 1), (4, 5)),  # (epoch size, batch size)
-    (0, 4, 11),  # test iterations
-    ("idx", "batch_info", "sample_info"),  # indexing mode
-    (True, False),  # parallel
-)
-def test_external_source_checkpointing_pytorch(dataset_info, iterations, mode, parallel):
-    epoch_size, batch_size = dataset_info
-    source = make_dummy_source(epoch_size, batch_size, mode)
-    pf = make_external_source_test_pipeline_factory(source, mode, batch_size, parallel)
-    check_external_source_pipeline_checkpointing_pytorch(pf, iterations)
-
-
 @cartesian_params(
     ("iterator", "iterable", "callable"),  # source kind
     (True, False),  # parallel
 )
 def test_external_source_unsupported(kind, parallel):
     if kind == "iterator":
-        source = iter([1, 2, 3])
+        source = iter([np.array(1), np.array(2), np.array(3)])
     elif kind == "iterable":
-        source = [1, 2, 3]
+        source = [np.array(1), np.array(2), np.array(3)]
     elif kind == "callable":
 
         def source():
-            return 42
+            return np.array(42)
 
     @pipeline_def(batch_size=1, num_threads=1, device_id=0, enable_checkpointing=True)
     def pipeline():
-        return fn.external_source(source=source)
+        return fn.external_source(source=source, batch=False)
 
     with assert_warns(glob="DALI doesn't capture state of such 'source'."):
         pipeline().build()
@@ -1281,6 +1152,50 @@ def test_trivial_augment(device):
     check_pipeline_checkpointing_native(pipeline)
 
 
+@cartesian_params((0, 1), (0, 3), (0, 1), (0, 4))
+def test_multiple_restores(warmup_epochs, warmup_iters, run_epochs, run_iters):
+    batch_size = 4
+
+    @pipeline_def(batch_size=batch_size, num_threads=4, device_id=0, enable_checkpointing=True)
+    def pipeline():
+        data, _ = fn.readers.file(name="Reader", file_root=images_dir)
+        return fn.decoders.image(data, device="cpu")
+
+    pipe = pipeline()
+
+    iters_in_epoch = pipe.reader_meta()["Reader"]["epoch_size"] // batch_size
+    warmup_iters += warmup_epochs * iters_in_epoch
+    run_iters += run_epochs * iters_in_epoch
+
+    for _ in range(warmup_iters):
+        pipe.run()
+
+    pipe2 = pipeline(checkpoint=pipe.checkpoint())
+    for _ in range(run_iters):
+        pipe2.run()
+
+    pipe3 = pipeline(checkpoint=pipe2.checkpoint())
+
+    compare_pipelines(pipe2, pipe3, batch_size, 5)
+
+
+def test_unsupported_dangling_subgraph():
+    es = fn.external_source("asdf")
+
+    @pipeline_def(batch_size=1, num_threads=1, device_id=None, enable_checkpointing=True)
+    def pipe(arg):
+        return arg + 0
+
+    p = pipe(es)
+
+    with assert_raises(
+        RuntimeError,
+        glob="The pipeline does not support checkpointing*"
+        "because it contains operator*outside the pipeline*",
+    ):
+        p.build()
+
+
 unsupported_readers = [
     "experimental.readers.fits",
 ]
@@ -1288,12 +1203,12 @@ unsupported_readers = [
 unsupported_ops = [
     "experimental.decoders.video",
     "experimental.inputs.video",
-    "experimental.decoders.image_random_crop",
+    "plugin.video.decoder",
 ]
 
 
 def test_coverage():
-    from test_dali_stateless_operators import stateless_signed_off
+    from checkpointing.test_dali_stateless_operators import stateless_signed_off
 
     tested_ops = (
         stateless_signed_off.tested_ops

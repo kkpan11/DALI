@@ -1,4 +1,4 @@
-// Copyright (c) 2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2023-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -68,7 +68,7 @@ class PipelineWrapper {
     clone.Build();
 
     for (const auto &[spec, id] : ops_) {
-      OpCheckpoint cpt(spec);
+      OpCheckpoint cpt(id);
       // TODO(mstaniewski): provide a stream, so operators with state kept
       // in device memory can be tested.
       GetOperator(id)->SaveState(cpt, {});
@@ -80,8 +80,7 @@ class PipelineWrapper {
 
   template<typename OutputType>
   std::vector<OutputType> RunIteration() {
-    pipe_->RunCPU();
-    pipe_->RunGPU();
+    pipe_->Run();
     pipe_->Outputs(&ws_);
 
     auto collect_value_from_each_sample = [](const TensorList<CPUBackend> &data) {
@@ -101,8 +100,8 @@ class PipelineWrapper {
   }
 
  protected:
-  OperatorBase *GetOperator(const std::string &name) {
-    return pipe_->GetOperatorNode(name)->op.get();
+  OperatorBase *GetOperator(std::string_view name) {
+    return pipe_->GetOperator(name);
   }
 
   const int batch_size_;

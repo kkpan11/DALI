@@ -1,4 +1,4 @@
-# Copyright (c) 2020-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2020-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -22,13 +22,11 @@ import nvidia.dali.types as types
 import os
 import re
 from collections.abc import Iterable
-from nose.plugins.attrib import attr
-from nose.tools import nottest
+from nose_utils import attr, nottest, assert_raises
 from nvidia.dali.pipeline import Pipeline, pipeline_def
 from nvidia.dali.pipeline.experimental import pipeline_def as experimental_pipeline_def
 from nvidia.dali.plugin.numba.fn.experimental import numba_function
 
-from nose_utils import assert_raises
 from segmentation_test_utils import make_batch_select_masks
 from test_dali_cpu_only_utils import (
     pipeline_arithm_ops_cpu,
@@ -76,7 +74,6 @@ def test_tensorflow_build_check():
         return data
 
     pipe = get_dali_pipe(batch_size=3, device_id=types.CPU_ONLY_DEVICE_ID, num_threads=1)
-    pipe.build()
     pipe.run()
 
 
@@ -94,8 +91,8 @@ def test_move_to_device_end():
         RuntimeError,
         pipe.build,
         glob="Cannot move the data node __ExternalSource_* to the GPU in a CPU-only pipeline. "
-        "The `device_id` parameter is set to `CPU_ONLY_DEVICE_ID`. "
-        "Set `device_id` to a valid GPU identifier to enable GPU features in the pipeline.",
+        "The 'device_id' parameter is set to `CPU_ONLY_DEVICE_ID`. "
+        "Set 'device_id' to a valid GPU identifier to enable GPU features in the pipeline.",
     )
 
 
@@ -113,7 +110,11 @@ def test_move_to_device_middle():
     assert_raises(
         RuntimeError,
         pipe.build,
-        glob="Cannot add a GPU operator Rotate, device_id should not be equal CPU_ONLY_DEVICE_ID.",
+        glob=(
+            "Error in GPU operator `nvidia.dali.fn.rotate`*"
+            "Cannot add a GPU operator. "
+            "Pipeline 'device_id' should not be equal to `CPU_ONLY_DEVICE_ID`."
+        ),
     )
 
 
@@ -133,8 +134,12 @@ def check_bad_device(device_id, error_msg):
 def test_gpu_op_bad_device():
     device_ids = [None, 0]
     error_msgs = [
-        "Cannot add a GPU operator ExternalSource, device_id should not be equal CPU_ONLY_DEVICE_ID.",  # noqa: E501
-        "Failed to load libcuda.so. Check your library paths and if the driver is installed correctly.",  # noqa: E501
+        (
+            "Error in GPU operator `nvidia.dali.fn.external_source`*"
+            "Cannot add a GPU operator."
+            " Pipeline 'device_id' should not be equal to `CPU_ONLY_DEVICE_ID`."
+        ),
+        "You are trying to create a GPU DALI pipeline, while CUDA is not available.*",
     ]
 
     for device_id, error_msg in zip(device_ids, error_msgs):
@@ -152,8 +157,12 @@ def check_mixed_op_bad_device(device_id, error_msg):
 def test_mixed_op_bad_device():
     device_ids = [None, 0]
     error_msgs = [
-        "Cannot add a mixed operator decoders__Image with a GPU output, device_id should not be CPU_ONLY_DEVICE_ID.",  # noqa: E501
-        "Failed to load libcuda.so. Check your library paths and if the driver is installed correctly.",  # noqa: E501
+        (
+            "Error in MIXED operator `nvidia.dali.fn.decoders.image`*"
+            "Cannot add a Mixed operator with a GPU output,"
+            " 'device_id' should not be `CPU_ONLY_DEVICE_ID`"
+        ),
+        "You are trying to create a GPU DALI pipeline, while CUDA is not available.*",
     ]
 
     for device_id, error_msg in zip(device_ids, error_msgs):
@@ -184,7 +193,6 @@ def check_single_input(
             pipe.set_outputs(*processed)
         else:
             pipe.set_outputs(processed)
-    pipe.build()
     for _ in range(3):
         pipe.run()
 
@@ -197,7 +205,6 @@ def check_no_input(op, get_data=get_data, **kwargs):
             pipe.set_outputs(*processed)
         else:
             pipe.set_outputs(processed)
-    pipe.build()
     for _ in range(3):
         pipe.run()
 
@@ -254,7 +261,6 @@ def test_cast_like_cpu():
     pipe = Pipeline(batch_size=batch_size, num_threads=3, device_id=None)
     out = fn.cast_like(np.array([1, 2, 3], dtype=np.int32), np.array([1.0], dtype=np.float32))
     pipe.set_outputs(out)
-    pipe.build()
     for _ in range(3):
         pipe.run()
 
@@ -309,7 +315,6 @@ def _test_image_decoder_args_cpu(decoder_type, **args):
     input, _ = fn.readers.file(file_root=images_dir, shard_id=0, num_shards=1)
     decoded = decoder_type(input, output_type=types.RGB, **args)
     pipe.set_outputs(decoded)
-    pipe.build()
     for _ in range(3):
         pipe.run()
 
@@ -342,8 +347,18 @@ def test_coin_flip_cpu():
     check_no_input(fn.random.coin_flip)
 
 
+def test_random_beta_cpu():
+    check_no_input(fn.random.beta)
+
+
 def test_uniform_device():
     check_no_input(fn.random.uniform)
+
+
+def test_random_choice_cpu():
+    check_single_input(
+        fn.random.choice, input_layout=None, get_data=lambda: np.array(5), batch=False
+    )
 
 
 def test_reshape_cpu():
@@ -481,7 +496,6 @@ def test_nonsilent_region_cpu():
     data = fn.external_source(source=get_data)
     processed, _ = fn.nonsilent_region(data)
     pipe.set_outputs(processed)
-    pipe.build()
     for _ in range(3):
         pipe.run()
 
@@ -522,7 +536,6 @@ def test_mel_filter_bank_cpu():
     spectrum = fn.spectrogram(data, nfft=60, window_length=50, window_step=25)
     processed = fn.mel_filter_bank(spectrum)
     pipe.set_outputs(processed)
-    pipe.build()
     for _ in range(3):
         pipe.run()
 
@@ -543,7 +556,6 @@ def test_mfcc_cpu():
     dec = fn.to_decibels(mel)
     processed = fn.mfcc(dec)
     pipe.set_outputs(processed)
-    pipe.build()
     for _ in range(3):
         pipe.run()
 
@@ -574,7 +586,6 @@ def test_one_hot_cpu():
     data = fn.external_source(source=get_data)
     processed = fn.one_hot(data, num_classes=256)
     pipe.set_outputs(processed)
-    pipe.build()
     for _ in range(3):
         pipe.run()
 
@@ -588,7 +599,6 @@ def test_audio_decoder_cpu():
     input, _ = fn.readers.file(files=audio_files, shard_id=0, num_shards=1)
     decoded, _ = fn.decoders.audio(input)
     pipe.set_outputs(decoded)
-    pipe.build()
     for _ in range(3):
         pipe.run()
 
@@ -673,7 +683,6 @@ def test_slice_cpu():
     shape = fn.external_source(source=get_shape)
     processed = fn.slice(data, anchors, shape, out_of_bounds_policy="pad")
     pipe.set_outputs(processed)
-    pipe.build()
     for _ in range(3):
         pipe.run()
 
@@ -706,7 +715,6 @@ def _test_image_decoder_slice_cpu(decoder_type):
     shape = fn.external_source(source=get_shape)
     processed = decoder_type(input, anchors, shape)
     pipe.set_outputs(processed)
-    pipe.build()
     for _ in range(3):
         pipe.run()
 
@@ -733,7 +741,6 @@ def test_pad_cpu():
     data = fn.external_source(source=get_data, layout="HWC")
     processed = fn.pad(data, fill_value=-1, axes=(0,), shape=(10,))
     pipe.set_outputs(processed)
-    pipe.build()
     for _ in range(3):
         pipe.run()
 
@@ -771,7 +778,6 @@ def test_tfrecord_reader_cpu():
     )
     out = input["image/encoded"]
     pipe.set_outputs(out)
-    pipe.build()
     for _ in range(3):
         pipe.run()
 
@@ -855,7 +861,6 @@ def test_bbox_paste_cpu():
     paste_ratio = fn.random.uniform(range=(1, 2))
     processed = fn.bbox_paste(data, paste_x=paste_posx, paste_y=paste_posy, ratio=paste_ratio)
     pipe.set_outputs(processed)
-    pipe.build()
     for _ in range(3):
         pipe.run()
 
@@ -893,7 +898,6 @@ def test_random_bbox_crop_cpu():
         bbox_layout="xyXY",
     )
     pipe.set_outputs(processed)
-    pipe.build()
     for _ in range(3):
         pipe.run()
 
@@ -925,7 +929,6 @@ def test_ssd_random_crop_cpu():
     lables = fn.external_source(source=get_lables)
     processed, _, _ = fn.ssd_random_crop(data, boxes, lables)
     pipe.set_outputs(processed)
-    pipe.build()
     for _ in range(3):
         pipe.run()
 
@@ -971,7 +974,6 @@ def test_box_encoder_cpu():
     labels = fn.external_source(source=get_labels)
     processed, _ = fn.box_encoder(boxes, labels, anchors=coco_anchors())
     pipe.set_outputs(processed)
-    pipe.build()
     for _ in range(3):
         pipe.run()
 
@@ -979,6 +981,7 @@ def test_box_encoder_cpu():
 def test_numpy_reader_cpu():
     with setup_test_numpy_reader_cpu() as test_data_root:
         check_no_input(fn.readers.numpy, file_root=test_data_root)
+        check_no_input(fn.readers.numpy, file_root=test_data_root, dont_use_mmap=True)
 
 
 @attr("pytorch")
@@ -1042,7 +1045,6 @@ def test_combine_transforms_cpu():
         s = fn.transforms.scale(scale=(2, 3))
         out = fn.transforms.combine(t, r, s)
     pipe.set_outputs(out)
-    pipe.build()
     for _ in range(3):
         pipe.run()
 
@@ -1076,7 +1078,6 @@ def test_segmentation_select_masks():
             selected_masks, polygons, vertices, reindex_masks=False
         )
     pipe.set_outputs(polygons, vertices, selected_masks, out_polygons, out_vertices)
-    pipe.build()
     for _ in range(3):
         pipe.run()
 
@@ -1099,7 +1100,6 @@ def test_reduce_std_cpu():
     mean = fn.reductions.mean(data)
     reduced = fn.reductions.std_dev(data, mean)
     pipe.set_outputs(reduced)
-    pipe.build()
     for _ in range(3):
         pipe.run()
 
@@ -1114,7 +1114,6 @@ def test_reduce_variance_cpu():
 
 def test_arithm_ops_cpu():
     pipe = pipeline_arithm_ops_cpu(get_data, batch_size=batch_size, num_threads=4, device_id=None)
-    pipe.build()
     for _ in range(3):
         pipe.run()
 
@@ -1144,8 +1143,9 @@ def test_arithm_ops_cpu_gpu():
         RuntimeError,
         pipe.build,
         glob=(
-            "Cannot add a GPU operator ArithmeticGenericOp,"
-            " device_id should not be equal CPU_ONLY_DEVICE_ID."
+            "Error in GPU operator `nvidia.dali.math.*`*"
+            "Cannot add a GPU operator."
+            " Pipeline 'device_id' should not be equal to `CPU_ONLY_DEVICE_ID`."
         ),
     )
 
@@ -1171,7 +1171,6 @@ def test_cat_cpu():
     data3 = fn.external_source(source=get_data, layout="HWC")
     pixel_pos = fn.cat(data, data2, data3)
     pipe.set_outputs(pixel_pos)
-    pipe.build()
     for _ in range(3):
         pipe.run()
 
@@ -1183,7 +1182,6 @@ def test_stack_cpu():
     data3 = fn.external_source(source=get_data, layout="HWC")
     pixel_pos = fn.stack(data, data2, data3)
     pipe.set_outputs(pixel_pos)
-    pipe.build()
     for _ in range(3):
         pipe.run()
 
@@ -1194,7 +1192,6 @@ def test_batch_permute_cpu():
     perm = fn.batch_permutation(seed=420)
     processed = fn.permute_batch(data, indices=perm)
     pipe.set_outputs(processed)
-    pipe.build()
     for _ in range(3):
         pipe.run()
 
@@ -1215,7 +1212,6 @@ def _test_peek_image_shape_cpu(op):
     input, _ = fn.readers.file(file_root=images_dir, shard_id=0, num_shards=1)
     shapes = op(input)
     pipe.set_outputs(shapes)
-    pipe.build()
     for _ in range(3):
         pipe.run()
 
@@ -1242,7 +1238,6 @@ def test_separated_exec_setup():
     images_cpu = fn.dump_image(images, suffix="cpu")
     pipe.set_outputs(images, images_cpu)
 
-    pipe.build()
     out = pipe.run()
     assert out[0].is_dense_tensor()
     assert out[1].is_dense_tensor()
@@ -1259,7 +1254,6 @@ def test_tensor_subscript():
     pipe = Pipeline(batch_size=3, num_threads=3, device_id=None)
     input = fn.external_source(source=get_data)
     pipe.set_outputs(input[1:, :-1, 1])
-    pipe.build()
     (out,) = pipe.run()
     assert out.at(0).shape == np.zeros(test_data_shape)[1:, :-1, 1].shape
 
@@ -1277,7 +1271,6 @@ def test_get_property():
     root_path = os.path.join(data_root, "db", "single", "png", "0")
     files = [os.path.join(root_path, i) for i in os.listdir(root_path)]
     p = file_properties(files, batch_size=8, num_threads=4, device_id=None)
-    p.build()
     output = p.run()
     for out in output:
         for source_info, ref in zip(out, files):
@@ -1309,7 +1302,6 @@ def test_video_input():
     n_iterations = 3
     test_data = np.fromfile(video_files[0], dtype=np.uint8)
     p = video_input_pipeline(input_name)
-    p.build()
     p.feed_input(input_name, [test_data])
     for _ in range(n_iterations):
         p.run()
@@ -1327,7 +1319,6 @@ def test_conditional():
         return output
 
     cond_pipe = conditional_pipeline(batch_size=5, num_threads=1, device_id=None)
-    cond_pipe.build()
     cond_pipe.run()
 
     @pipeline_def
@@ -1344,8 +1335,56 @@ def test_conditional():
         return merged, negated, pred_validated
 
     pipe = explicit_conditional_ops_pipeline(batch_size=5, num_threads=1, device_id=None)
-    pipe.build()
     pipe.run()
+
+
+def get_shape_data():
+    out = [np.random.randint(100, 800, size=(2,), dtype=np.int64) for _ in range(batch_size)]
+    return out
+
+
+def test_random_crop_generator_cpu():
+    check_single_input(fn.random_crop_generator, get_data=get_shape_data, input_layout=None)
+
+
+def test_zeros():
+    check_no_input(fn.zeros)
+
+
+def test_zeros_like():
+    check_single_input(fn.zeros_like, get_data=lambda: np.zeros((2, 3)), input_layout=None)
+
+
+def test_ones():
+    check_no_input(fn.ones)
+
+
+def test_ones_like():
+    check_single_input(fn.ones_like, get_data=lambda: np.zeros((2, 3)), input_layout=None)
+
+
+def test_full():
+    check_single_input(fn.full, get_data=lambda: np.zeros((2, 3)), input_layout=None)
+
+
+def test_full_like():
+    @pipeline_def(batch_size=3, num_threads=1, device_id=None)
+    def full_like_pipe():
+        return fn.full_like(np.zeros((2, 3)), np.array([1, 2, 3]))
+
+    p = full_like_pipe()
+    for _ in range(3):
+        p.run()
+
+
+def test_io_file_read_cpu():
+    path_str = os.path.join(get_dali_extra_path(), "db/single/jpeg/100/swan-3584559_640.jpg")
+    check_single_input(
+        fn.io.file.read,
+        input_layout=None,
+        get_data=lambda: np.frombuffer(path_str.encode(), dtype=np.int8),
+        batch=False,
+    )
 
 
 tested_methods = [
@@ -1412,6 +1451,8 @@ tested_methods = [
     "coin_flip",
     "uniform",
     "random.uniform",
+    "random.beta",
+    "random.choice",
     "random.coin_flip",
     "random.normal",
     "random_bbox_crop",
@@ -1445,6 +1486,7 @@ tested_methods = [
     "water",
     "sphere",
     "erase",
+    "random_crop_generator",
     "random_resized_crop",
     "ssd_random_crop",
     "bbox_paste",
@@ -1521,6 +1563,13 @@ tested_methods = [
     "dl_tensor_python_function",
     "audio_resample",
     "experimental.decoders.video",
+    "zeros",
+    "zeros_like",
+    "ones",
+    "ones_like",
+    "full",
+    "full_like",
+    "io.file.read",
 ]
 
 excluded_methods = [
@@ -1541,6 +1590,11 @@ excluded_methods = [
     "experimental.remap",  # operator is GPU-only
     "experimental.readers.fits",  # lacking test files in DALI_EXTRA
     "experimental.median_blur",  # not supported for CPU
+    "experimental.dilate",  # not supported for CPU
+    "experimental.erode",  # not supported for CPU
+    "experimental.warp_perspective",  # not supported for CPU
+    "experimental.resize",  # not supported for CPU
+    "plugin.video.decoder",  # not supported for CPU
 ]
 
 

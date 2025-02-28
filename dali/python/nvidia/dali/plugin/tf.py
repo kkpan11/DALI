@@ -1,4 +1,4 @@
-# Copyright (c) 2017-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2017-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -26,7 +26,7 @@ from nvidia.dali.external_source import _is_external_source_with_callback
 from nvidia.dali._utils.external_source_impl import _get_generator_from_source_desc
 from nvidia.dali._utils.external_source_impl import _cycle_enabled
 
-from distutils.version import LooseVersion
+from packaging.version import Version
 import warnings
 
 from nvidia.dali_tf_plugin import dali_tf_plugin
@@ -54,7 +54,7 @@ Support for input tf.data.Datasets is available only for TensorFlow 2.4.1 and ne
 Each of the input datasets must be mapped to a :meth:`~nvidia.dali.fn.external_source` operator
 that will represent the input to the DALI pipeline. In the pipeline the input is represented as
 the ``name`` parameter of :meth:`~nvidia.dali.fn.external_source`. Input datasets must be provided
-as a mapping from that ``name`` to the dataset object via the ``input_datasets`` dictionary
+as a mapping from that ``name`` to the dataset object via the `input_datasets` dictionary
 argument of DALIDatasetWithInputs.
 
 **Per-sample and batch mode**
@@ -71,7 +71,7 @@ ten 640x480 RGB images would have a shape ``[10, 480, 640, 3]``.
 
 In both cases (per-sample and batch mode), the layout of those inputs should be denoted as "HWC".
 
-In per-sample mode DALIDataset will query the inputs dataset ``batch_size``-times to build a batch
+In per-sample mode DALIDataset will query the inputs dataset `batch_size`-times to build a batch
 that would be fed into the DALI Pipeline.
 In per-sample mode, each sample produced by the input dataset can have a different shape,
 but the number of dimension and the layout must remain constant.
@@ -115,7 +115,7 @@ This allows TensorFlow DALIDataset to work with most Pipelines that have Externa
 .. note::
     Parallel execution of external source callback provided via ``source`` is not supported.
     The callback is executed via TensorFlow ``tf.data.Dataset.from_generator`` - the ``parallel``
-    and ``prefetch_queue_depth`` parameters are ignored.
+    and `prefetch_queue_depth` parameters are ignored.
 
 
 The operator adds additional parameters to the ones supported by the
@@ -136,7 +136,7 @@ Parameters
                 'generator_input': tf.data.Dataset.from_generator(some_generator)
             }
 
-        can be passed as ``input_datasets`` for Pipeline like::
+        can be passed as `input_datasets` for Pipeline like::
 
             @pipeline_def
             def external_source_pipe():
@@ -214,6 +214,7 @@ def DALIIteratorWrapper(
     dtypes=[],
     batch_size=-1,
     prefetch_queue_depth=2,
+    exec_dynamic=False,
     **kwargs,
 ):
     """
@@ -231,6 +232,9 @@ def DALIIteratorWrapper(
         exec_separated = False
         cpu_prefetch_queue_depth = -1  # dummy: wont' be used
         gpu_prefetch_queue_depth = prefetch_queue_depth
+
+    if pipeline is not None and pipeline.exec_dynamic:
+        exec_dynamic = True
 
     if serialized_pipeline is None:
         serialized_pipeline = serialize_pipeline(pipeline)
@@ -281,6 +285,7 @@ def DALIIteratorWrapper(
         exec_separated=exec_separated,
         gpu_prefetch_queue_depth=gpu_prefetch_queue_depth,
         cpu_prefetch_queue_depth=cpu_prefetch_queue_depth,
+        exec_dynamic=exec_dynamic,
         **kwargs,
     )
     new_out = []
@@ -307,29 +312,29 @@ def DALIRawIterator():
 
 
 def _get_tf_version():
-    return LooseVersion(tf.__version__)
+    return Version(tf.__version__)
 
 
-MIN_TENSORFLOW_VERSION = LooseVersion("1.15")
+MIN_TENSORFLOW_VERSION = Version("1.15")
 
 
 def dataset_compatible_tensorflow():
     """Returns ``True`` if current TensorFlow version is compatible with DALIDataset."""
-    return LooseVersion(tf.__version__) >= MIN_TENSORFLOW_VERSION
+    return Version(tf.__version__) >= MIN_TENSORFLOW_VERSION
 
 
 def dataset_inputs_compatible_tensorflow():
     """Returns ``True`` if the current TensorFlow version is compatible with
     experimental.DALIDatasetWithInputs and input Datasets can be used with DALI.
     """
-    return LooseVersion(tf.__version__) >= LooseVersion("2.4.1")
+    return Version(tf.__version__) >= Version("2.4.1")
 
 
 def dataset_distributed_compatible_tensorflow():
     """Returns ``True`` if the tf.distribute APIs for current TensorFlow version are compatible
     with DALIDataset.
     """
-    return LooseVersion(tf.__version__) >= LooseVersion("2.5.0")
+    return Version(tf.__version__) >= Version("2.5.0")
 
 
 def _get_experimental():
@@ -436,6 +441,7 @@ if dataset_compatible_tensorflow():
             num_threads=4,
             device_id=0,
             exec_separated=False,
+            exec_dynamic=False,
             prefetch_queue_depth=2,
             cpu_prefetch_queue_depth=2,
             gpu_prefetch_queue_depth=2,
@@ -444,6 +450,9 @@ if dataset_compatible_tensorflow():
         ):
             output_shapes = self._handle_deprecation(output_shapes, shapes, "shapes")
             output_dtypes = self._handle_deprecation(output_dtypes, dtypes, "dtypes")
+
+            if pipeline.exec_dynamic:
+                exec_dynamic = True
 
             if not self._check_dtypes(output_dtypes, tf.DType):
                 raise TypeError(
@@ -475,6 +484,7 @@ if dataset_compatible_tensorflow():
                 device_id = types.CPU_ONLY_DEVICE_ID
             self._device_id = device_id
             self._exec_separated = exec_separated
+            self._exec_dynamic = exec_dynamic
             self._prefetch_queue_depth = prefetch_queue_depth
             self._cpu_prefetch_queue_depth = cpu_prefetch_queue_depth
             self._gpu_prefetch_queue_depth = gpu_prefetch_queue_depth
@@ -805,6 +815,7 @@ if dataset_compatible_tensorflow():
                 num_threads=self._num_threads,
                 device_id=self._device_id,
                 exec_separated=self._exec_separated,
+                exec_dynamic=self._exec_dynamic,
                 prefetch_queue_depth=self._prefetch_queue_depth,
                 cpu_prefetch_queue_depth=self._cpu_prefetch_queue_depth,
                 gpu_prefetch_queue_depth=self._gpu_prefetch_queue_depth,
@@ -813,7 +824,7 @@ if dataset_compatible_tensorflow():
                 fail_on_device_mismatch=self._fail_on_device_mismatch,
             )
 
-    if _get_tf_version() < LooseVersion("2.0"):
+    if _get_tf_version() < Version("2.0"):
 
         class _DALIDatasetImpl(dataset_ops.DatasetV1Adapter):
             @functools.wraps(_DALIDatasetV2.__init__)
@@ -865,6 +876,7 @@ else:
             num_threads=4,
             device_id=0,
             exec_separated=False,
+            exec_dynamic=False,
             prefetch_queue_depth=2,
             cpu_prefetch_queue_depth=2,
             gpu_prefetch_queue_depth=2,
@@ -958,11 +970,11 @@ DALIDataset.__doc__ = """Creates a ``DALIDataset`` compatible with
     output_dtypes: tf.DType or tuple of tf.DType, default = None
         expected output types
     output_shapes: tuple of shapes, optional, default = None
-        expected output shapes. If provided, must match arity of the ``output_dtypes``.
+        expected output shapes. If provided, must match arity of the `output_dtypes`.
         When set to None, DALI will infer the shapes on its own.
         Individual shapes can be also set to None or contain None to indicate unknown dimensions.
         If specified must be compatible with shape returned from DALI Pipeline
-        and with ``batch_size`` argument which will be the outermost dimension of returned tensors.
+        and with `batch_size` argument which will be the outermost dimension of returned tensors.
         In case of ``batch_size = 1`` it can be omitted in the shape.
         DALI Dataset will try to match requested shape by squeezing 1-sized dimensions
         from shape obtained from Pipeline.
@@ -984,21 +996,26 @@ DALIDataset.__doc__ = """Creates a ``DALIDataset`` compatible with
         Whether to execute the pipeline in a way that enables
         overlapping CPU and GPU computation, typically resulting
         in faster execution speed, but larger memory consumption.
+        This flag is incompatible with ``exec_dymamic``.
+    exec_dynamic : bool, optional, default = False
+        Whether to execute the pipeline with the dynamic executor, which allows flexible mixing
+        of CPU and GPU operators and enables aggressive memory reuse.
+        This flag is incompatible with `exec_separated`.
     prefetch_queue_depth : int, optional, default = 2
         depth of the executor queue. Deeper queue makes DALI more
         resistant to uneven execution time of each batch, but it also
         consumes more memory for internal buffers.
-        Value will be used with ``exec_separated`` set to ``False``.
+        Value will be used with `exec_separated` set to ``False``.
     cpu_prefetch_queue_depth : int, optional, default = 2
         depth of the executor cpu queue. Deeper queue makes DALI more
         resistant to uneven execution time of each batch, but it also
         consumes more memory for internal buffers.
-        Value will be used with ``exec_separated`` set to ``True``.
+        Value will be used with `exec_separated` set to ``True``.
     gpu_prefetch_queue_depth : int, optional, default = 2
         depth of the executor gpu queue. Deeper queue makes DALI more
         resistant to uneven execution time of each batch, but it also
         consumes more memory for internal buffers.
-        Value will be used with ``exec_separated`` set to ``True``.
+        Value will be used with `exec_separated` set to ``True``.
 
     Returns
     -------

@@ -1,4 +1,4 @@
-// Copyright (c) 2017-2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2017-2022, 2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -220,6 +220,7 @@ class DALIDatasetOp::Dataset : public DatasetBase {
     SerializeField(attrs, b, kNumThreads, pipeline_def_.num_threads);
     SerializeField(attrs, b, kDeviceId, pipeline_def_.device_id);
     SerializeField(attrs, b, kExecSeparated, pipeline_def_.exec_separated);
+    SerializeField(attrs, b, kExecDynamic, pipeline_def_.exec_dynamic);
     SerializeField(attrs, b, kPrefetchQueueDepth, pipeline_def_.prefetch_queue_depth);
     SerializeField(attrs, b, kCpuPrefetchQueueDepth, pipeline_def_.cpu_prefetch_queue_depth);
     SerializeField(attrs, b, kGpuPrefetchQueueDepth, pipeline_def_.gpu_prefetch_queue_depth);
@@ -248,10 +249,15 @@ class DALIDatasetOp::Dataset : public DatasetBase {
   }
 
   Status InitPipeline(daliPipelineHandle *pipeline_handle) const {
-    TF_DALI_CALL(daliCreatePipeline(
+    dali_exec_flags_t flags = DALI_EXEC_ASYNC_PIPELINED;
+    if (pipeline_def_.exec_dynamic)
+      flags = flags | DALI_EXEC_IS_DYNAMIC;
+    if (pipeline_def_.exec_separated)
+      flags = flags | DALI_EXEC_IS_SEPARATED;
+    TF_DALI_CALL(daliCreatePipeline3(
         pipeline_handle, pipeline_def_.pipeline.c_str(), pipeline_def_.pipeline.length(),
         pipeline_def_.batch_size, pipeline_def_.num_threads, pipeline_def_.device_id,
-        pipeline_def_.exec_separated, pipeline_def_.prefetch_queue_depth,
+        flags, pipeline_def_.prefetch_queue_depth,
         pipeline_def_.cpu_prefetch_queue_depth, pipeline_def_.gpu_prefetch_queue_depth,
         pipeline_def_.enable_memory_stats));
     return Status();
@@ -380,35 +386,80 @@ class DALIDatasetOp::Dataset::Iterator : public DatasetIterator<Dataset> {
   }
 
   ~Iterator() {
-    if (enable_memory_stats_) {
-      size_t N;
-      daliExecutorMetadata *meta;
-      daliGetExecutorMetadata(&pipeline_handle_, &meta, &N);
-      std::cout << "DALI operator memory statistics: " << std::endl;
-      for (size_t i = 0; i < N; ++i) {
-        std::cout << "Operator " << meta[i].operator_name;
-        for (size_t j = 0; j < meta[i].out_num; ++j) {
-          std::cout << "   output [ " << j << " ] : " << meta[i].real_size[j] << "B allocated "
-                    << meta[i].max_real_size[j] << "B max allocated " << meta[i].reserved[j]
-                    << "B reserved" << meta[i].max_reserved[j] << "B max reserved";
-          if (j != meta[i].out_num - 1) {
-            std::cout << ",";
+    if (pipeline_handle_) {
+      if (enable_memory_stats_) {
+        size_t N;
+        daliExecutorMetadata *meta;
+        daliGetExecutorMetadata(&pipeline_handle_, &meta, &N);
+        std::cout << "DALI operator memory statistics: " << std::endl;
+        for (size_t i = 0; i < N; ++i) {
+          std::cout << "Operator " << meta[i].operator_name;
+          for (size_t j = 0; j < meta[i].out_num; ++j) {
+            std::cout << "   output [ " << j << " ] : " << meta[i].real_size[j] << "B allocated "
+                      << meta[i].max_real_size[j] << "B max allocated " << meta[i].reserved[j]
+                      << "B reserved" << meta[i].max_reserved[j] << "B max reserved";
+            if (j != meta[i].out_num - 1) {
+              std::cout << ",";
+            }
           }
+          std::cout << std::endl;
         }
-        std::cout << std::endl;
+        daliFreeExecutorMetadata(meta, N);
       }
-      daliFreeExecutorMetadata(meta, N);
+      daliDeletePipeline(&pipeline_handle_);
     }
-    daliDeletePipeline(&pipeline_handle_);
   }
 
 #if TF_MAJOR_VERSION > 2 || (TF_MAJOR_VERSION == 2 && TF_MINOR_VERSION >= 3)
-  Status SaveInternal(SerializationContext *ctx, IteratorStateWriter *writer) override {
-    return errors::Unimplemented("SaveInternal is not supported for DALI dataset.");
+  Status SaveInternal(SerializationContext *ctx,
+                      IteratorStateWriter *writer) override {
+    TF_RETURN_IF_ERROR(checkCheckpointingSupport());
+    tensorflow::mutex_lock l(mu_);
+
+    char *cpt;
+    size_t n;
+    daliExternalContextCheckpoint external_context{};
+    TF_DALI_CALL(daliGetSerializedCheckpoint(
+      &pipeline_handle_, &external_context, &cpt, &n));
+
+    tensorflow::Tensor cpt_tensor(DT_UINT8, {n});
+    memcpy(cpt_tensor.data(), cpt, n);
+    TF_DALI_CALL(daliDestroyExternalContextCheckpoint(&external_context));
+    TF_DALI_CALL(daliFree(cpt));
+    TF_RETURN_IF_ERROR(writer->WriteTensor(prefix(), "checkpoint", cpt_tensor));
+
+
+#if TF_MAJOR_VERSION > 2 || (TF_MAJOR_VERSION == 2 && TF_MINOR_VERSION >= 10)
+    return OkStatus();
+#else
+    return Status::OK();
+#endif
   }
 
-  Status RestoreInternal(IteratorContext *ctx, IteratorStateReader *reader) override {
-    return errors::Unimplemented("RestoreInternal is not supported for DALI dataset");
+  Status RestoreInternal(IteratorContext *ctx,
+                         IteratorStateReader *reader) override {
+    TF_RETURN_IF_ERROR(checkCheckpointingSupport());
+    tensorflow::mutex_lock l(mu_);
+
+    tensorflow::Tensor cpt_tensor;
+    TF_RETURN_IF_ERROR(reader->ReadTensor(prefix(), "checkpoint", &cpt_tensor));
+    auto cpt_data = cpt_tensor.tensor_data();
+
+    TF_DALI_CALL(daliDeletePipeline(&pipeline_handle_));
+    TF_RETURN_IF_ERROR(dataset()->InitPipeline(&pipeline_handle_));
+    daliExternalContextCheckpoint external_context{};
+    TF_DALI_CALL(daliRestoreFromSerializedCheckpoint(
+      &pipeline_handle_, cpt_data.data(), cpt_data.size(), &external_context));
+
+    // Checkpointing is not supported with separated queues, so we can just prefetch uniformly
+    TF_DALI_CALL(daliPrefetchUniform(&pipeline_handle_,
+                                     dataset()->pipeline_def_.prefetch_queue_depth));
+
+#if TF_MAJOR_VERSION > 2 || (TF_MAJOR_VERSION == 2 && TF_MINOR_VERSION >= 10)
+    return OkStatus();
+#else
+    return Status::OK();
+#endif
   }
 #endif
 
@@ -419,6 +470,7 @@ class DALIDatasetOp::Dataset::Iterator : public DatasetIterator<Dataset> {
    * When there are input datasets, feed the pipeline required number of input batches.
    *
    * TODO(klecki): Inputs handled only for an uniform executor
+   * TODO(michalz): Clean up the control flow (reverse if nesting)
    */
   Status PrefetchPipeline(IteratorContext *context, daliPipelineHandle *pipeline_handle) {
     if (!dataset()->pipeline_def_.exec_separated) {
@@ -441,14 +493,13 @@ class DALIDatasetOp::Dataset::Iterator : public DatasetIterator<Dataset> {
       } else {
         actual_prefetch_depth = prefetch_depth;
       }
-      TF_DALI_CALL(daliPrefetchUniform(pipeline_handle, actual_prefetch_depth));
+      for (int i = 0; i < actual_prefetch_depth; i++)
+        TF_DALI_CALL(daliRun(pipeline_handle));
     } else {
       if (dataset()->HasInputs()) {
         return errors::InvalidArgument("Input datasets are not compatible with split executor.");
       }
-      TF_DALI_CALL(daliPrefetchSeparate(pipeline_handle,
-                                        dataset()->pipeline_def_.cpu_prefetch_queue_depth,
-                                        dataset()->pipeline_def_.gpu_prefetch_queue_depth));
+      TF_DALI_CALL(daliPrefetch(pipeline_handle));
     }
     return Status();
   }
@@ -655,7 +706,7 @@ class DALIDatasetOp::Dataset::Iterator : public DatasetIterator<Dataset> {
           dst = reinterpret_cast<void *>(output.flat<int32_t>().data());
           break;
         case DT_INT64:
-          dst = reinterpret_cast<void *>(output.flat<int64>().data());
+          dst = reinterpret_cast<void *>(output.flat<int64_t>().data());
           break;
         default:
           return errors::InvalidArgument(
@@ -872,6 +923,20 @@ class DALIDatasetOp::Dataset::Iterator : public DatasetIterator<Dataset> {
     return 0;
   }
 
+  /**
+   * @brief Check checkpointing support and return and error if not
+   */
+  Status checkCheckpointingSupport() {
+    if (dataset()->device_type_ == GPU) {
+      // Current TensorFlow (2.15) will raise an error before even getting here
+      return errors::Unimplemented("Checkpointing is not supported for DALI GPU dataset.");
+    }
+    if (dataset()->HasInputs()) {
+      return errors::Unimplemented("Checkpointing is not supported for DALI dataset with inputs.");
+    }
+    return Status();
+  }
+
   enum class InputState {
     in_progress,   // we can still use inputs, none have ended
     stop_pending,  // input signalled end, we stop reading them, some might be in pipeline
@@ -884,8 +949,8 @@ class DALIDatasetOp::Dataset::Iterator : public DatasetIterator<Dataset> {
   std::vector<dali_backend_t> input_ext_src_devices_;
   std::queue<ListOfBatches> alive_batches_;
   InputState iterator_state_ = InputState::in_progress;
-  daliPipelineHandle pipeline_handle_;
-  bool enable_memory_stats_;
+  daliPipelineHandle pipeline_handle_ = nullptr;
+  bool enable_memory_stats_ = false;
 };
 
 void DALIDatasetOp::MakeDataset(OpKernelContext *context, DatasetBase **output) {
@@ -902,6 +967,7 @@ void DALIDatasetOp::FillPipelineDef(OpKernelConstruction *context, PipelineDef &
   OP_REQUIRES_OK(context, context->GetAttr(kNumThreads, &def.num_threads));
   OP_REQUIRES_OK(context, context->GetAttr(kDeviceId, &def.device_id));
   OP_REQUIRES_OK(context, context->GetAttr(kExecSeparated, &def.exec_separated));
+  OP_REQUIRES_OK(context, context->GetAttr(kExecDynamic, &def.exec_dynamic));
   OP_REQUIRES_OK(context, context->GetAttr(kPrefetchQueueDepth, &def.prefetch_queue_depth));
   OP_REQUIRES_OK(context, context->GetAttr(kCpuPrefetchQueueDepth, &def.cpu_prefetch_queue_depth));
   OP_REQUIRES_OK(context, context->GetAttr(kGpuPrefetchQueueDepth, &def.gpu_prefetch_queue_depth));
@@ -1022,6 +1088,7 @@ REGISTER_OP("DALIDataset")
     .Attr("num_threads: int")
     .Attr("device_id: int")
     .Attr("exec_separated: bool")
+    .Attr("exec_dynamic: bool")
     .Attr("prefetch_queue_depth: int")
     .Attr("cpu_prefetch_queue_depth: int")
     .Attr("gpu_prefetch_queue_depth: int")

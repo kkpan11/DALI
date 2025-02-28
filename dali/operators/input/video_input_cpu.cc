@@ -1,4 +1,4 @@
-// Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,16 +16,6 @@
 #include <memory>
 
 namespace dali {
-
-
-template<>
-void VideoInput<CPUBackend, dali::FramesDecoder>::CreateDecoder(const Workspace &ws) {
-  auto sample = encoded_video_[0];
-  auto data = reinterpret_cast<const char *>(sample.data<uint8_t>());
-  size_t size = sample.shape().num_elements();
-  this->frames_decoders_[0] = std::make_unique<dali::FramesDecoder>(data, size, false);
-}
-
 
 DALI_SCHEMA(experimental__inputs__Video)
                 .DocStr(
@@ -53,28 +43,32 @@ batches of sequences. Every output batch will have the ``max_batch_size`` sample
 the Pipeline creation. When the number of frames in the video file does not allow to split
 the frames uniformly across batches, the last batch returned by this operator for a given video
 will be partial and the last sequence in this batch will be determined using
-``last_sequence_policy`` parameter. For example::
+`last_sequence_policy` parameter. For example::
 
 
     This is a video that consists of 67 frames (every '-' is a frame):
     -------------------------------------------------------------------
 
 
-    User decided that there shall be 5 frames per sequence and the last_sequence_policy='partial':
+    User decided that there shall be 5 frames per sequence and
+    the last_sequence_policy='partial':
     -------------------------------------------------------------------
     [   ][   ][   ][   ][   ][   ][   ][   ][   ][   ][   ][   ][   ][]
     -------------------------------------------------------------------
-                      Since there are not enough frames, the last sequence comprises 2 frames.
+    Since there are not enough frames, the last sequence comprises 2 frames.
 
 
-    The Pipeline has max_batch_size=3, therefore the operator will return 5 batches of sequences.
-    First 4 batches comprise 3 sequences and the last batch is partial and comprises 2 sequences.
+    The Pipeline has max_batch_size=3, therefore the operator will return
+    5 batches of sequences.
+    First 4 batches comprise 3 sequences and the last batch is partial and
+    comprises 2 sequences.
     ---------------   ---------------   ---------------   ---------------   -------
     [   ][   ][   ]   [   ][   ][   ]   [   ][   ][   ]   [   ][   ][   ]   [   ][]
     ---------------   ---------------   ---------------   ---------------   -------
 
 
-    With the last_sequence_policy='pad', the last sequence of the last batch will be padded with 0:
+    With the last_sequence_policy='pad', the last sequence of the last batch
+    will be padded with 0:
     ---------------   ---------------   ---------------   ---------------   -------000
     [   ][   ][   ]   [   ][   ][   ]   [   ][   ][   ]   [   ][   ][   ]   [   ][   ]
     ---------------   ---------------   ---------------   ---------------   -------000

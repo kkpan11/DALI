@@ -11,7 +11,11 @@ version_eq "$DALI_CUDA_MAJOR_VERSION" "12" && \
   mv /usr/local/cuda /usr/local/cuda_bak && \
   ln -s cuda-12.0 /usr/local/cuda
 version_ge "$DALI_CUDA_MAJOR_VERSION" "11" && \
-  pip uninstall -y `pip list | grep nvidia-cu | cut -d " " -f1` `pip list | grep nvidia-n | cut -d " " -f1` \
+  pip uninstall -y `pip list | grep nvidia-cufft | cut -d " " -f1` \
+                   `pip list | grep nvidia-nvjpeg | cut -d " " -f1` \
+                   `pip list | grep nvidia-nvjpeg2k | cut -d " " -f1` \
+                   `pip list | grep nvidia-nvtiff | cut -d " " -f1` \
+                   `pip list | grep nvidia-npp | cut -d " " -f1` \
   || true
 
 export DO_NOT_INSTALL_CUDA_WHEEL="TRUE"
@@ -39,4 +43,6 @@ version_ge "$DALI_CUDA_MAJOR_VERSION" "11" && \
   pip install nvidia-cufft-cu${DALI_CUDA_MAJOR_VERSION}  \
               nvidia-npp-cu${DALI_CUDA_MAJOR_VERSION}    \
               nvidia-nvjpeg-cu${DALI_CUDA_MAJOR_VERSION} \
+              nvidia-nvjpeg2k-cu${DALI_CUDA_MAJOR_VERSION} \
+              nvidia-nvtiff-cu${DALI_CUDA_MAJOR_VERSION} \
   || true

@@ -12,7 +12,7 @@ topdir=$(cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null && pwd )/..
 source $topdir/qa/setup_test_common.sh
 
 # Set runner for python tests
-export PYTHONPATH=${PYTHONPATH}:$topdir/qa
+export PYTHONPATH=${PYTHONPATH}:$topdir/qa:$topdir/dali/test/python
 python_test_runner_package="nose nose2 nose-timer nose2-test-timer"
 # use DALI nose wrapper to patch nose to support Python 3.10
 python_test_runner="python -m nose_wrapper"
@@ -84,12 +84,16 @@ enable_sanitizer() {
     gcc -shared -fPIC $topdir/qa/test_wrapper_post.c -o /tmp/post.so
     export OLD_LD_PRELOAD=${LD_PRELOAD}
     export LD_PRELOAD="/tmp/pre.so /usr/lib/x86_64-linux-gnu/libasan.so /tmp/glibc_fix.so /tmp/post.so /usr/lib/x86_64-linux-gnu/libstdc++.so /tmp/libfakeclose.so"
+    # Workaround for bug in asan ignoring RPATHs https://bugzilla.redhat.com/show_bug.cgi?id=1449604
+    export OLD_LD_LIBRARY_PATH2=${LD_LIBRARY_PATH}  # OLD_LD_LIBRARY_PATH variable name already used
+    export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$(python -c 'import nvidia.nvimgcodec as n; import os; print(os.path.dirname(n.__file__))')
 }
 
 # turn off sanitizer to avoid breaking any non-related system built-ins
 disable_sanitizer() {
     export ASAN_OPTIONS=start_deactivated=true:detect_leaks=0:detect_container_overflow=0
     export LD_PRELOAD=${OLD_LD_PRELOAD}
+    export LD_LIBRARY_PATH=${OLD_LD_LIBRARY_PATH2}
     unset ASAN_SYMBOLIZER_PATH
     unset PYTHONMALLOC
 }
@@ -148,10 +152,14 @@ do
         echo "Test variant run: $variant"
         # install the latest cuda wheel for CUDA 11.x and above tests if it is x86_64
         # or we just want to use CUDA from system, not wheels
+        # or we are in conda
         version_ge "${CUDA_VERSION}" "110" && \
-          if [ "$(uname -m)" == "x86_64" ] && [ -z "${DO_NOT_INSTALL_CUDA_WHEEL}" ]; then
-            install_pip_pkg "pip install --upgrade nvidia-npp-cu${DALI_CUDA_MAJOR_VERSION}    \
+          if [ "$(uname -m)" == "x86_64" ] && [ -z "${DO_NOT_INSTALL_CUDA_WHEEL}" ] && [ -z "${CONDA_PREFIX}" ]; then
+            NPP_VERSION=$(if [[ $DALI_CUDA_MAJOR_VERSION == "12" ]]; then echo "==12.2.5.30"; else echo ""; fi)
+            install_pip_pkg "pip install --upgrade nvidia-npp-cu${DALI_CUDA_MAJOR_VERSION}${NPP_VERSION}    \
                                                    nvidia-nvjpeg-cu${DALI_CUDA_MAJOR_VERSION} \
+                                                   nvidia-nvjpeg2k-cu${DALI_CUDA_MAJOR_VERSION} \
+                                                   nvidia-nvtiff-cu${DALI_CUDA_MAJOR_VERSION} \
                                                    nvidia-cufft-cu${DALI_CUDA_MAJOR_VERSION}  \
                                                    -f /pip-packages"
           fi
@@ -169,9 +177,12 @@ do
                 # The package name can be nvidia-dali-tf-plugin,  nvidia-dali-tf-plugin-weekly or nvidia-dali-tf-plugin-nightly
                 # Different DALI can be installed as a dependency of nvidia-dali so uninstall it too
                 pip uninstall -y `pip list | grep nvidia-dali-tf-plugin | cut -d " " -f1` || true
-                pip uninstall -y `pip list | grep nvidia-dali | cut -d " " -f1` || true
-                pip install /opt/dali/nvidia_dali*.whl
-                pip install /opt/dali/nvidia-dali-tf-plugin*.tar.gz
+                # don't reinstall DALI wheen in conda as we use conda package
+                if [ -z "${CONDA_PREFIX}" ]; then
+                    pip uninstall -y `pip list | grep nvidia-dali | cut -d " " -f1` || true
+                    pip install /opt/dali/nvidia_dali*.whl;
+                fi
+                pip install /opt/dali/nvidia_dali_tf_plugin*.tar.gz
             fi
             # if we are using any cuda or nvidia-tensorflow wheels (nvidia-npp, nvidia-nvjpeg or nvidia-cufft)
             # unset LD_LIBRARY_PATH to not used cuda from /usr/local/ but from wheels

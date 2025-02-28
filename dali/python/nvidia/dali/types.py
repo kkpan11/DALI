@@ -1,4 +1,4 @@
-# Copyright (c) 2017-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2017-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,7 +14,9 @@
 
 # pylint: disable=no-name-in-module,unused-import
 from enum import Enum, unique
+import ctypes
 import re
+from nvidia.dali import backend_impl
 
 from nvidia.dali._backend_enums import (
     DALIDataType as DALIDataType,
@@ -396,6 +398,8 @@ def _raw_cuda_stream(stream_obj):
 def _get_default_stream_for_array(array):
     if isinstance(array, list) and len(array):
         array = array[0]
+    if isinstance(array, (backend_impl.TensorListGPU, backend_impl.TensorGPU)):
+        return array.stream
     if _is_torch_tensor(array):
         import torch
 
@@ -406,6 +410,11 @@ def _get_default_stream_for_array(array):
         return _raw_cuda_stream(cupy.cuda.get_current_stream())
     else:
         return None
+
+
+def _raw_cuda_stream_ptr(stream_obj):
+    raw_stream = _raw_cuda_stream(stream_obj)
+    return None if raw_stream is None else ctypes.c_void_p(raw_stream)
 
 
 def _get_device_id_for_array(array):
@@ -519,6 +528,8 @@ def ConstantNode(device, value, dtype, shape, layout, **kwargs):
             has_floats = False
             has_ints = False
             has_bools = False
+            has_enums = False
+            enum_type = None
             for x in v:
                 if isinstance(x, float):
                     has_floats = True
@@ -526,8 +537,35 @@ def ConstantNode(device, value, dtype, shape, layout, **kwargs):
                     has_bools = True
                 elif isinstance(x, int):
                     has_ints = True
+                elif isinstance(x, (DALIDataType, DALIImageType, DALIInterpType)):
+                    has_enums = True
+                    enum_type = type(x)
+                    break
                 else:
                     raise TypeError("Unexpected type: " + str(type(x)))
+
+            if has_enums:
+                for x in v:
+                    if not isinstance(x, enum_type):
+                        raise TypeError(
+                            f"Expected all elements of the input to be the "
+                            f"same enum type: `{enum_type.__name__}` but got `{type(x).__name__}` "
+                            f"for one of the elements."
+                        )
+
+            if has_enums:
+                if issubclass(enum_type, DALIDataType):
+                    return DALIDataType.DATA_TYPE
+                elif issubclass(enum_type, DALIImageType):
+                    return DALIDataType.IMAGE_TYPE
+                elif issubclass(enum_type, DALIInterpType):
+                    return DALIDataType.INTERP_TYPE
+                else:
+                    raise TypeError(
+                        f"Unexpected enum type: `{enum_type.__name__}`, expected one of: "
+                        "`nvidia.dali.types.DALIDataType`, `nvidia.dali.types.DALIImageType`, "
+                        "or `nvidia.dali.types.DALIInterpType`."
+                    )
 
             if has_floats:
                 return DALIDataType.FLOAT
@@ -582,7 +620,8 @@ def Constant(value, dtype=None, shape=None, layout=None, device=None, **kwargs):
 
     Args
     ----
-    value: `bool`, `int`, `float`, a `list` or `tuple` thereof or a `numpy.ndarray`
+    value: `bool`, `int`, `float`, `DALIDataType` `DALIImageType`, `DALIInterpType`,
+           a `list` or `tuple` thereof or a `numpy.ndarray`
         The constant value to wrap. If it is a scalar, it can be used as scalar
         value in mathematical expressions. Otherwise, it will produce a constant
         tensor node (optionally reshaped according to `shape` argument).
@@ -606,10 +645,24 @@ def Constant(value, dtype=None, shape=None, layout=None, device=None, **kwargs):
         and the arguments are passed to the `dali.ops.Constant` operator
     """
 
+    def is_enum(value, dtype):
+        # we force true scalar enums through a Constant node rather than using ScalarConstant
+        # as they do not support any arithmetic operations
+        if isinstance(value, (DALIDataType, DALIImageType, DALIInterpType)):
+            return True
+        elif dtype is not None and dtype in {
+            DALIDataType.DATA_TYPE,
+            DALIDataType.IMAGE_TYPE,
+            DALIDataType.INTERP_TYPE,
+        }:
+            return True
+        return False
+
     if (
         device is not None
         or (_is_compatible_array_type(value) and not _is_true_scalar(value))
         or isinstance(value, (list, tuple))
+        or is_enum(value, dtype)
         or not _is_scalar_shape(shape)
         or kwargs
         or layout is not None

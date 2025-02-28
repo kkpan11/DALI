@@ -1,4 +1,4 @@
-# Copyright (c) 2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2023-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,6 +13,9 @@
 # limitations under the License.
 
 import threading
+
+import numpy as np
+import jax.numpy as jnp
 
 from nvidia.dali.plugin.base_iterator import LastBatchPolicy
 from nvidia.dali.plugin.jax.iterator import DALIGenericIterator, _data_iterator_impl
@@ -79,11 +82,11 @@ class DALIGenericPeekableIterator(DALIGenericIterator):
                 is called internally automatically.
     last_batch_policy: optional, default = LastBatchPolicy.FILL
                 What to do with the last batch when there are not enough samples in the epoch
-                to fully fill it. See :meth:`nvidia.dali.plugin.base_iterator.LastBatchPolicy`
+                to fully fill it. See :meth:`nvidia.dali.plugin.base_iterator.LastBatchPolicy`.
                 JAX iterator does not support LastBatchPolicy.PARTIAL
     last_batch_padded : bool, optional, default = False
                 Whether the last batch provided by DALI is padded with the last sample
-                or it just wraps up. In the conjunction with ``last_batch_policy`` it tells
+                or it just wraps up. In the conjunction with `last_batch_policy` it tells
                 if the iterator returning last batch with data only partially filled with
                 data from the current epoch is dropping padding samples or samples from
                 the next epoch. If set to ``False`` next
@@ -94,7 +97,8 @@ class DALIGenericPeekableIterator(DALIGenericIterator):
     prepare_first_batch : bool, optional, default = True
                 Whether DALI should buffer the first batch right after the creation of the iterator,
                 so one batch is already prepared when the iterator is prompted for the data
-    sharding : ``jax.sharding.Sharding`` compatible object that, if present, will be used to
+    sharding : `jax.sharding.Sharding`
+                `jax.sharding.Sharding` compatible object that, if present, will be used to
                 build an output jax.Array for each category. If ``None``, the iterator returns
                 values compatible with pmapped JAX functions, if multiple pipelines are provided.
 
@@ -145,18 +149,18 @@ class DALIGenericPeekableIterator(DALIGenericIterator):
         self._pool = None
         self._peek = None
 
-        # Set element spec based on the first element
         self._element_spec = None
-        peeked_output = self.peek()
 
+    def _set_element_spec(self, output):
         self._element_spec = {
-            output_name: get_spec_for_array(peeked_output[output_name])
+            output_name: get_spec_for_array(output[output_name])
             for output_name in self._output_categories
         }
 
     def _assert_output_shape_and_type(self, output):
         if self._element_spec is None:
-            return output
+            # Set element spec based on the first seen element
+            self._set_element_spec(output)
 
         for key in output:
             if get_spec_for_array(output[key]) != self._element_spec[key]:
@@ -224,6 +228,14 @@ class DALIGenericPeekableIterator(DALIGenericIterator):
         future = self._pool.submit(self.peek)
         return future
 
+    def checkpoints(self):
+        if self._peek is not None:
+            raise RuntimeError(
+                "Checkpointing is not supported for peekable iterators with peeked data. "
+                "Consume the peeked data completely using next() before saving a checkpoint."
+            )
+        return super().checkpoints()
+
     @property
     def element_spec(self) -> ElementSpec:
         """Returns the element spec for the elements returned by the iterator.
@@ -233,7 +245,42 @@ class DALIGenericPeekableIterator(DALIGenericIterator):
         Returns:
             ElementSpec: Element spec for the elements returned by the iterator.
         """
+        if self._element_spec is None:
+            self._set_element_spec(self.peek())
         return self._element_spec
+
+    @property
+    def is_nonpadding(self):
+        """Returns array of booleans that indicate if the returned sample is a padding sample.
+
+        Returns:
+            jax.Array of booleans that indicates if the returned sample is a padding sample.
+            Shape is (batch_size,). Sharding is the same as the output.
+        """
+        left = self.batch_size - (
+            self._counter - self._shard_sizes_per_gpu_initial[self._shards_id]
+        )
+        if_drop = np.less(left, self.batch_size)
+
+        is_nonpadding_shards = []
+
+        for i in range(self._num_gpus):
+            if not if_drop[i]:
+                is_nonpadding_shards.append(np.ones((self.batch_size,), dtype=bool))
+            else:
+                is_nonpadding_shards.append(
+                    np.concatenate(
+                        (
+                            np.ones((left[i],), dtype=bool),
+                            np.zeros((self.batch_size - left[i],), dtype=bool),
+                        )
+                    )
+                )
+
+        if self._sharding is None:
+            return np.concatenate(is_nonpadding_shards)
+
+        return jax.device_put(jnp.concatenate(is_nonpadding_shards), self._sharding)
 
 
 def peekable_data_iterator(
@@ -289,11 +336,11 @@ def peekable_data_iterator(
                 is called internally automatically.
     last_batch_policy: optional, default = LastBatchPolicy.FILL
                 What to do with the last batch when there are not enough samples in the epoch
-                to fully fill it. See :meth:`nvidia.dali.plugin.base_iterator.LastBatchPolicy`
+                to fully fill it. See :meth:`nvidia.dali.plugin.base_iterator.LastBatchPolicy`.
                 JAX iterator does not support LastBatchPolicy.PARTIAL
     last_batch_padded : bool, optional, default = False
                 Whether the last batch provided by DALI is padded with the last sample
-                or it just wraps up. In the conjunction with ``last_batch_policy`` it tells
+                or it just wraps up. In the conjunction with `last_batch_policy` it tells
                 if the iterator returning last batch with data only partially filled with
                 data from the current epoch is dropping padding samples or samples from
                 the next epoch. If set to ``False`` next
@@ -304,15 +351,20 @@ def peekable_data_iterator(
     prepare_first_batch : bool, optional, default = True
                 Whether DALI should buffer the first batch right after the creation of the iterator,
                 so one batch is already prepared when the iterator is prompted for the data
-    sharding : ``jax.sharding.Sharding`` compatible object that, if present, will be used to
+    sharding : `jax.sharding.Sharding`
+                `jax.sharding.Sharding` compatible object that, if present, will be used to
                 build an output jax.Array for each category. Iterator will return outputs
                 compatible with automatic parallelization in JAX.
                 This argument is mutually exclusive with `devices` argument. If `devices` is
                 provided, `sharding` should be set to None.
-    devices : list of jax.devices to be used to run the pipeline in parallel. Iterator will
+    devices : list of `jax.Device`
+                List of JAX devices to be used to run the pipeline in parallel. Iterator will
                 return outputs compatible with pmapped JAX functions.
-                This argument is mutually exclusive with `sharding` argument. If `sharding`
+                This argument is  mutually exclusive with `sharding` argument. If `sharding`
                 is provided, `devices` should be set to None.
+    checkpoints : list of str, optional, default = None
+                Checkpoints obtained with `.checkpoints()` method of the iterator.
+                If provided, they will be used to restore the state of the pipelines.
 
     Example
     -------

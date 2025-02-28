@@ -22,7 +22,6 @@
 #include "dali/core/common.h"
 #include "dali/core/error_handling.h"
 #include "dali/core/tensor_shape.h"
-#include "dali/kernels/scratch.h"
 #include "dali/pipeline/operator/common.h"
 #include "dali/pipeline/operator/checkpointing/stateless_operator.h"
 #include "dali/pipeline/operator/operator.h"
@@ -40,10 +39,6 @@ class Erase : public StatelessOperator<Backend> {
   using Operator<Backend>::RunImpl;
   void RunImpl(Workspace &ws) override;
   bool SetupImpl(std::vector<OutputDesc> &output_desc, const Workspace &ws) override;
-
-  bool CanInferOutputs() const override {
-    return true;
-  }
 
   USE_OPERATOR_MEMBERS();
 

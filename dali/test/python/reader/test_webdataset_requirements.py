@@ -1,4 +1,4 @@
-# Copyright (c) 2021-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2021-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,8 +17,7 @@ from glob import glob
 import math
 import nvidia.dali as dali
 from test_utils import compare_pipelines, get_dali_extra_path
-from nose_utils import assert_raises
-from nose.tools import assert_equal
+from nose_utils import assert_raises, assert_equals
 from webdataset_base import (
     generate_temp_extract,
     generate_temp_index_file,
@@ -98,8 +97,7 @@ def test_skip_sample():
         device_id=0,
         num_threads=1,
     )
-    wds_pipeline.build()
-    assert_equal(list(wds_pipeline.epoch_size().values())[0], num_samples)
+    assert_equals(list(wds_pipeline.epoch_size().values())[0], num_samples)
 
 
 def test_raise_error_on_missing():
@@ -163,7 +161,6 @@ def test_dtypes():
         device_id=0,
         num_threads=1,
     )
-    wds_pipeline.build()
     for sample_idx in range(num_samples):
         if sample_idx % test_batch_size == 0:
             f16, i32, f64 = wds_pipeline.run()

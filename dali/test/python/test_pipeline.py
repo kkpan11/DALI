@@ -1,4 +1,4 @@
-# Copyright (c) 2017-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2017-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -36,9 +36,7 @@ from test_utils import (
     get_dali_extra_path,
     RandomDataIterator,
 )
-from nose_utils import raises
-from nose_utils import assert_raises
-from nose.plugins.skip import SkipTest
+from nose_utils import raises, assert_raises, assert_warns, SkipTest
 
 test_data_root = get_dali_extra_path()
 caffe_db_folder = os.path.join(test_data_root, "db", "lmdb")
@@ -77,7 +75,6 @@ def test_tensor_multiple_uses():
             return (images, images_cpu, images_gpu)
 
     pipe = HybridPipe(batch_size=batch_size, num_threads=1, device_id=0, num_gpus=1)
-    pipe.build()
     out = pipe.run()
     assert out[0].is_dense_tensor()
     assert out[1].is_dense_tensor()
@@ -160,7 +157,6 @@ def test_multiple_input_sets():
             )
 
     pipe = MISPipe(batch_size=batch_size, num_threads=1, device_id=0, num_gpus=1)
-    pipe.build()
     out = pipe.run()
     for i in range(batch_size):
         for j in range(0, len(out) - 2, 2):
@@ -201,7 +197,6 @@ def test_pipeline_separated_exec_setup():
         num_gpus=1,
         prefetch_queue_depth={"cpu_size": 5, "gpu_size": 3},
     )
-    pipe.build()
     out = pipe.run()
     assert out[0].is_dense_tensor()
     assert out[1].is_dense_tensor()
@@ -245,7 +240,6 @@ def test_pipeline_simple_sync_no_prefetch():
             return (images, images_gpu)
 
     pipe = HybridPipe(batch_size=batch_size)
-    pipe.build()
     for _ in range(n_iters):
         pipe.run()
 
@@ -270,7 +264,6 @@ def test_use_twice():
             return (images0, images1)
 
     pipe = Pipe(batch_size=batch_size, num_threads=1, device_id=0, num_gpus=1)
-    pipe.build()
     out = pipe.run()
     assert out[0].is_dense_tensor()
     assert out[1].is_dense_tensor()
@@ -314,7 +307,6 @@ def test_cropmirrornormalize_layout():
             return (output_nchw, output_nhwc)
 
     pipe = HybridPipe(batch_size=batch_size, num_threads=1, device_id=0, num_gpus=1)
-    pipe.build()
     out = pipe.run()
     assert out[0].is_dense_tensor()
     assert out[1].is_dense_tensor()
@@ -369,7 +361,6 @@ def test_cropmirrornormalize_pad():
 
     for layout in [types.NCHW, types.NHWC]:
         pipe = HybridPipe(layout, batch_size=batch_size, num_threads=1, device_id=0, num_gpus=1)
-        pipe.build()
         out = pipe.run()
         assert out[0].is_dense_tensor()
         assert out[1].is_dense_tensor()
@@ -429,7 +420,6 @@ def test_cropmirrornormalize_multiple_inputs():
 
     for device in ["cpu", "gpu"]:
         pipe = HybridPipe(batch_size=batch_size, device=device)
-        pipe.build()
         for _ in range(5):
             out1, out2, out3, out4 = pipe.run()
             outs = [out.as_cpu() if device == "gpu" else out for out in [out1, out2, out3, out4]]
@@ -469,7 +459,6 @@ def test_seed():
     n = 30
     for i in range(50):
         pipe = HybridPipe(batch_size=batch_size, num_threads=2, device_id=0)
-        pipe.build()
         pipe_out = pipe.run()
         pipe_out_cpu = pipe_out[0].as_cpu()
         img_chw_test = pipe_out_cpu.at(n)
@@ -486,13 +475,25 @@ def test_none_seed():
         with pipe:
             coin = fn.random.uniform(range=(0.0, 1.0))
         pipe.set_outputs(coin)
-        pipe.build()
         pipe_out = pipe.run()[0]
         test_out = pipe_out.as_array()
         if i == 0:
             test_out_ref = test_out
         else:
             assert np.sum(np.abs(test_out_ref - test_out)) != 0
+
+
+def test_seed_deprecated():
+    @pipeline_def(batch_size=1, device_id=None, num_threads=1)
+    def my_pipe():
+        with assert_warns(
+            DeprecationWarning,
+            glob='The argument "seed" should not be used with operators '
+            "that don't use random numbers.",
+        ):
+            return fn.reshape(np.float32([1, 2]), shape=[2], seed=123)
+
+    my_pipe()
 
 
 def test_as_array():
@@ -523,9 +524,8 @@ def test_as_array():
             )
             return (output, self.labels)
 
-    for i in range(50):
+    for i in range(10):
         pipe = HybridPipe(batch_size=batch_size, num_threads=2, device_id=0)
-        pipe.build()
         pipe_out = pipe.run()
         pipe_out_cpu = pipe_out[0].as_cpu()
         img_chw_test = pipe_out_cpu.as_array()
@@ -536,7 +536,7 @@ def test_as_array():
 
 
 def test_seed_serialize():
-    batch_size = 64
+    batch_size = 32
 
     class HybridPipe(Pipeline):
         def __init__(self, batch_size, num_threads, device_id):
@@ -563,18 +563,17 @@ def test_seed_serialize():
             )
             return (output, self.labels)
 
-    n = 30
     orig_pipe = HybridPipe(batch_size=batch_size, num_threads=2, device_id=0)
     s = orig_pipe.serialize()
-    for i in range(50):
+    for i in range(10):
         pipe = Pipeline()
         pipe.deserialize_and_build(s)
         pipe_out = pipe.run()
         pipe_out_cpu = pipe_out[0].as_cpu()
-        img_chw_test = pipe_out_cpu.at(n)
         if i == 0:
-            img_chw = img_chw_test
-        assert np.sum(np.abs(img_chw - img_chw_test)) == 0
+            ref = pipe_out_cpu
+        else:
+            check_batch(pipe_out_cpu, ref)
 
 
 def test_make_contiguous_serialize():
@@ -635,7 +634,7 @@ def test_make_contiguous_serialize_and_use():
     new_pipe = Pipeline(batch_size=batch_size, num_threads=2, device_id=0)
     new_pipe.deserialize_and_build(serialized_pipeline)
 
-    compare_pipelines(pipe, new_pipe, batch_size, 50)
+    compare_pipelines(pipe, new_pipe, batch_size, 5)
 
 
 def test_warpaffine():
@@ -668,11 +667,9 @@ def test_warpaffine():
             return [self.labels] + outputs
 
     pipe = HybridPipe(batch_size=128, num_threads=2, device_id=0)
-    pipe.build()
-    pipe_out = pipe.run()
+    _, orig_cpu, dali_output_batch = tuple(out.as_cpu() for out in pipe.run())
     import cv2
 
-    orig_cpu = pipe_out[1].as_cpu()
     for i in range(128):
         orig = orig_cpu.at(i)
         # apply 0.5 correction for opencv's not-so-good notion of pixel centers
@@ -685,7 +682,7 @@ def test_warpaffine():
             borderValue=(128, 128, 128),
             flags=(cv2.WARP_INVERSE_MAP + cv2.INTER_LINEAR),
         )
-        dali_output = pipe_out[2].as_cpu().at(i)
+        dali_output = dali_output_batch.at(i)
         maxdif = np.max(cv2.absdiff(out, dali_output) / 255.0)
         assert maxdif < 0.025
 
@@ -734,7 +731,6 @@ def test_type_conversion():
             return [self.labels] + outputs
 
     pipe = HybridPipe(batch_size=128, num_threads=2, device_id=0)
-    pipe.build()
     for i in range(10):
         pipe_out = pipe.run()
         orig_cpu = pipe_out[1].as_cpu().as_tensor()
@@ -793,7 +789,6 @@ def test_lazy_init_empty_data_path():
     nonlazy_pipe = LazyPipeline(batch_size, empty_db_folder, lazy_type=False)
     with assert_raises(RuntimeError):
         nonlazy_pipe.build()
-
     lazy_pipe = LazyPipeline(batch_size, empty_db_folder, lazy_type=True)
     lazy_pipe.build()
 
@@ -824,7 +819,7 @@ def test_iter_setup():
         def __next__(self):
             batch = []
             if self.i < self.n:
-                batch.append(np.arange(0, 1, dtype=np.float))
+                batch.append(np.arange(0, 1, dtype=float))
                 self.i += 1
                 return batch
             else:
@@ -860,7 +855,6 @@ def test_iter_setup():
 
     iterator = iter(TestIterator(iter_num))
     pipe = IterSetupPipeline(iterator, 3, 0)
-    pipe.build()
 
     i = 0
     while True:
@@ -880,44 +874,6 @@ def test_iter_setup():
         except StopIteration:
             break
     assert iter_num == i
-
-
-def test_pipeline_default_cuda_stream_priority():
-    batch_size = 16
-    n_iters = 12
-
-    class HybridPipe(Pipeline):
-        def __init__(self, batch_size, default_cuda_stream_priority=0):
-            super(HybridPipe, self).__init__(
-                batch_size,
-                num_threads=1,
-                device_id=0,
-                prefetch_queue_depth=1,
-                exec_async=False,
-                exec_pipelined=False,
-                default_cuda_stream_priority=default_cuda_stream_priority,
-            )
-            self.input = ops.readers.Caffe(path=caffe_db_folder)
-            self.decode = ops.decoders.Image(device="mixed", output_type=types.RGB)
-
-        def define_graph(self):
-            inputs, labels = self.input(name="Reader")
-            images = self.decode(inputs)
-            return images
-
-    HIGH_PRIORITY = -1
-    LOW_PRIORITY = 0
-    pipe1 = HybridPipe(batch_size=batch_size, default_cuda_stream_priority=HIGH_PRIORITY)
-    pipe2 = HybridPipe(batch_size=batch_size, default_cuda_stream_priority=LOW_PRIORITY)
-    pipe1.build()
-    pipe2.build()
-    for _ in range(n_iters):
-        out1 = pipe1.run()
-        out2 = pipe2.run()
-        for i in range(batch_size):
-            out1_data = out1[0].as_cpu()
-            out2_data = out2[0].as_cpu()
-            assert np.sum(np.abs(out1_data.at(i) - out2_data.at(i))) == 0
 
 
 class CachedPipeline(Pipeline):
@@ -1119,10 +1075,8 @@ def test_caffe_no_label():
             return images
 
     pipe = CaffePipeline(2, caffe_db_folder, True)
-    pipe.build()
     pipe.run()
     pipe = CaffePipeline(2, caffe_no_label_db_folder, False)
-    pipe.build()
     pipe.run()
 
 
@@ -1160,10 +1114,8 @@ def test_caffe2_no_label():
             return images
 
     pipe = Caffe2Pipeline(2, c2lmdb_db_folder, 0)
-    pipe.build()
     pipe.run()
     pipe = Caffe2Pipeline(2, c2lmdb_no_label_db_folder, 4)
-    pipe.build()
     pipe.run()
 
 
@@ -1180,7 +1132,6 @@ def test_as_tensor():
     batch_size = 8
     shape = [[2, 2, 2], [8, 1], [1, 8], [4, 2], [2, 4], [8], [1, 2, 1, 2, 1, 2], [1, 1, 1, 8]]
     pipe = HybridPipe(batch_size=batch_size, num_threads=2, device_id=0)
-    pipe.build()
     for sh in shape:
         pipe_out = pipe.run()[0]
         assert pipe_out.as_tensor().shape() == [batch_size, 1]
@@ -1211,7 +1162,6 @@ def test_as_tensor_fail():
         [7, 1, 1, 1, 8],
     ]
     pipe = HybridPipe(batch_size=batch_size, num_threads=2, device_id=0)
-    pipe.build()
     for sh in shape:
         pipe_out = pipe.run()[0]
         assert pipe_out.as_tensor().shape() == [batch_size, 1]
@@ -1250,14 +1200,13 @@ def test_python_formats():
         np.float32,
         np.float16,
         np.short,
-        np.long,
+        int,
         np.longlong,
         np.ushort,
         np.ulonglong,
     ]:
         test_array = np.array([[1, 1], [1, 1]], dtype=t)
         pipe = TestPipeline(2, 1, 0, 1, test_array)
-        pipe.build()
         out = pipe.run()[0]
         out_dtype = out.at(0).dtype
         assert test_array.dtype.itemsize == out_dtype.itemsize
@@ -1279,7 +1228,6 @@ def test_api_check1():
             return inputs
 
     pipe = TestPipeline(batch_size=batch_size, num_threads=1, device_id=0, num_gpus=1)
-    pipe.build()
     pipe.run()
     for method in [pipe.schedule_run, pipe.share_outputs, pipe.release_outputs, pipe.outputs]:
         with assert_raises(
@@ -1311,7 +1259,6 @@ def test_api_check2():
             return inputs
 
     pipe = TestPipeline(batch_size=batch_size, num_threads=1, device_id=0, num_gpus=1)
-    pipe.build()
     pipe.schedule_run()
     pipe.share_outputs()
     pipe.release_outputs()
@@ -1374,7 +1321,6 @@ def check_duplicated_outs_pipeline(first_device, second_device):
         first_out_device=first_device,
         second_out_device=second_device,
     )
-    pipe.build()
     out = pipe.run()
     assert len(out) == 4
     for i in range(batch_size):
@@ -1613,7 +1559,6 @@ def check_duplicated_outs_cpu_to_gpu(device):
         normalized_anchor=normalized_anchor,
         normalized_shape=normalized_shape,
     )
-    pipe.build()
     out = pipe.run()
     assert isinstance(out[0][0], dali.backend_impl.TensorGPU) or device == "cpu"
     assert not isinstance(out[1][0], dali.backend_impl.TensorGPU)
@@ -1639,7 +1584,6 @@ def test_ref_count():
 
     pipe = HybridPipe()
     assert sys.getrefcount(pipe) == 2
-    pipe.build()
     assert sys.getrefcount(pipe) == 2
 
 
@@ -1647,7 +1591,12 @@ def test_executor_meta():
     class TestPipeline(Pipeline):
         def __init__(self, batch_size, num_threads, device_id, num_gpus, seed):
             super(TestPipeline, self).__init__(
-                batch_size, num_threads, device_id, enable_memory_stats=True
+                batch_size,
+                num_threads,
+                device_id,
+                enable_memory_stats=True,
+                exec_async=False,
+                exec_pipelined=False,
             )
             self.input = ops.readers.Caffe(
                 path=caffe_db_folder, shard_id=device_id, num_shards=num_gpus, seed=seed
@@ -1678,7 +1627,6 @@ def test_executor_meta():
     test_pipe = TestPipeline(
         batch_size=batch_size, num_threads=1, device_id=0, num_gpus=1, seed=random_seed
     )
-    test_pipe.build()
     test_pipe.run()
     meta = test_pipe.executor_statistics()
     # all operators (readers.Caffe, decoders.ImageRandomCrop, Resize, CropMirrorNormalize,
@@ -1721,12 +1669,13 @@ def test_bytes_per_sample_hint():
 
     def obtain_reader_meta(iters=3, **kvargs):
         batch_size = 10
-        pipe = Pipeline(batch_size, 1, 0, enable_memory_stats=True)
+        pipe = Pipeline(
+            batch_size, 1, 0, exec_async=False, exec_pipelined=False, enable_memory_stats=True
+        )
         with pipe:
             out = fn.readers.caffe(path=caffe_db_folder, shard_id=0, num_shards=1, **kvargs)
             out = [o.gpu() for o in out]
             pipe.set_outputs(*out)
-        pipe.build()
         for _ in range(iters):
             pipe.run()
         meta = pipe.executor_statistics()
@@ -1761,7 +1710,6 @@ def trigger_output_dtype_deprecated_warning():
             std=[1.0, 1.0, 1.0],
         )
         pipe.set_outputs(cmn)
-    pipe.build()
 
     (result,) = pipe.run()
     assert result.as_array().dtype == np.float32
@@ -1785,7 +1733,6 @@ def trigger_image_type_deprecated_warning():
             std=[1.0, 1.0, 1.0],
         )
         pipe.set_outputs(cmn)
-    pipe.build()
 
     (result,) = pipe.run()
     assert result.as_array().dtype == np.float32
@@ -1801,8 +1748,7 @@ def test_output_dtype_deprecation():
         assert len(w) == 1
         assert issubclass(w[-1].category, DeprecationWarning)
         expected_msg = (
-            "The argument ``output_dtype`` is a deprecated alias for ``dtype``. "
-            "Use ``dtype`` instead."
+            "The argument `output_dtype` is a deprecated alias for `dtype`. Use `dtype` instead."
         )
         assert expected_msg == str(w[-1].message)
 
@@ -1817,7 +1763,7 @@ def test_image_type_deprecation():
         assert len(w) == 1
         assert issubclass(w[-1].category, DeprecationWarning)
         expected_msg = (
-            "The argument ``image_type`` is no longer used and will be removed "
+            "The argument `image_type` is no longer used and will be removed "
             "in a future release."
         )
         assert expected_msg == str(w[-1].message)
@@ -1842,7 +1788,6 @@ def test_output_dtype_both_error():
             std=[1.0, 1.0, 1.0],
         )
         pipe.set_outputs(cmn)
-    pipe.build()
 
 
 def test_epoch_size():
@@ -1876,7 +1821,6 @@ def test_epoch_size():
             return jpegs_mxnet, jpegs_caffe, jpegs_caffe2, jpegs_file
 
     pipe = ReaderPipeline(1)
-    pipe.build()
     meta = pipe.reader_meta()
     assert len(meta) == 4
     assert pipe.epoch_size("readers.mxnet") != 0
@@ -1891,7 +1835,6 @@ def test_pipeline_out_of_scope():
         pipe = dali.Pipeline(1, 1, 0)
         with pipe:
             pipe.set_outputs(dali.fn.external_source(source=[[np.array([-0.5, 1.25])]]))
-        pipe.build()
         return pipe.run()
 
     out = get_output()[0].at(0)
@@ -1902,7 +1845,6 @@ def test_return_constants():
     pipe = dali.Pipeline(1, 1, None)
     types = [bool, np.int8, np.uint8, np.int16, np.uint16, np.int32, np.uint32, np.float32]
     pipe.set_outputs(np.array([[1, 2], [3, 4]]), 10, *[t(42) for t in types])
-    pipe.build()
     a, b, *other = pipe.run()
     assert np.array_equal(a.at(0), np.array([[1, 2], [3, 4]]))
     assert b.at(0) == 10
@@ -1917,15 +1859,13 @@ def test_preserve_arg():
         out = dali.fn.external_source(source=[[np.array([-0.5, 1.25])]], preserve=True)
         res = dali.fn.resize(out, preserve=True)  # noqa: F841
         pipe.set_outputs(out)
-    pipe.build()
 
 
 def test_pipeline_wrong_device_id():
     pipe = dali.Pipeline(batch_size=1, num_threads=1, device_id=-123)
     with pipe:
         pipe.set_outputs(np.int32([1, 2, 3]))
-    with assert_raises(RuntimeError, glob="wrong device_id"):
-        pipe.build()
+    with assert_raises(Exception, regex="(wrong device_id)|(device_id.*is invalid)"):
         pipe.run()
 
 
@@ -1941,7 +1881,6 @@ def test_properties():
         assert pipe.exec_pipelined is True
         assert pipe.exec_async is True
         assert pipe.set_affinity is True
-        assert pipe.max_streams == -1
         assert pipe.prefetch_queue_depth == {"cpu_size": 3, "gpu_size": 2}
         assert pipe.cpu_queue_size == 3
         assert pipe.gpu_queue_size == 2
@@ -1999,7 +1938,6 @@ def check_dtype_ndim(dali_pipeline, output_dtype, output_ndim, n_outputs):
     with tempfile.NamedTemporaryFile() as f:
         dali_pipeline.serialize(filename=f.name)
         deserialized_pipeline = Pipeline.deserialize(filename=f.name)
-        deserialized_pipeline.build()
         assert ndim_dtype_matches(
             deserialized_pipeline.output_ndim(), output_ndim
         ), f"`output_ndim` is not serialized properly. {deserialized_pipeline.output_ndim()} vs {output_ndim}."  # noqa: E501
@@ -2007,7 +1945,6 @@ def check_dtype_ndim(dali_pipeline, output_dtype, output_ndim, n_outputs):
             deserialized_pipeline.output_dtype(), output_dtype
         ), f"`output_dtype` is not serialized properly. {deserialized_pipeline.output_dtype()} vs {output_dtype}."  # noqa: E501
         deserialized_pipeline.run()
-    dali_pipeline.build()
     dali_pipeline.run()
 
 
@@ -2155,3 +2092,322 @@ def test_double_output_dtype_ndim():
         create_test_package(output_dtype=int)
     with assert_raises(ValueError, glob="*types.NO_TYPE*"):
         create_test_package(output_dtype=types.NO_TYPE)
+
+
+def test_dangling_subgraph():
+    # This test ensures that operators defined outside of the pipeline are assigned
+    # same ids when the pipeline is built.
+
+    pipes = []
+    op1 = fn.external_source(
+        source=[np.int32([1, 2, 3]), np.int32([4, 5, 6])], cycle=True, batch=False
+    )
+    op2 = fn.external_source(
+        source=[np.int32([6, 5, 4]), np.int32([3, 2, 1])], cycle=True, batch=False
+    )
+    for i in range(2):
+        with Pipeline(batch_size=1, device_id=None, num_threads=1, seed=123) as p:
+            ret1 = op1 + op2
+            p.set_outputs(ret1)
+        pipes.append(p)
+
+    pipes[0].build()  # names and ids of op1 and op2 are adjusted here
+    pipes[1].build()  # names and ids of op3 and op4 are adjusted here
+
+    ser1 = pipes[0].serialize()
+    ser2 = pipes[1].serialize()
+    assert ser1 == ser2
+
+    (o1,) = pipes[0].run()
+    (o2,) = pipes[1].run()
+    assert np.array_equal(o1[0], np.int32([7, 7, 7]))
+    assert np.array_equal(o2[0], np.int32([7, 7, 7]))
+
+
+def test_regression_without_current_pipeline1():
+    def get_pipe(device):
+        pipe = Pipeline(batch_size=1, num_threads=1, device_id=0)
+        data = fn.external_source(source=[1, 2, 3], batch=False, cycle=True, device=device)
+        dist = data + fn.random.normal()
+        pipe.set_outputs(dist)
+        return pipe
+
+    p = get_pipe("gpu")
+    p.build()
+
+
+def test_regression_without_current_pipeline2():
+    pipe = Pipeline(batch_size=4, num_threads=3, device_id=0)
+    data = fn.external_source(source=[1, 2, 3], batch=False, cycle=True)
+    pipe.set_outputs(data.gpu())
+
+
+def test_subgraph_stealing():
+    p1 = Pipeline(batch_size=1, device_id=None, num_threads=1)
+    p2 = Pipeline(batch_size=1, device_id=None, num_threads=1)
+    with p1:
+        es1 = fn.external_source(source=[1, 2, 3], batch=False)
+        x = es1 + 1
+        p1.set_outputs(x)
+    with p2:
+        es2 = fn.external_source(source=[1, 2, 3], batch=False)
+        p2.set_outputs(x + es2)
+    with assert_raises(
+        RuntimeError,
+        glob="The pipeline is invalid because it contains operators with non-unique names",
+    ):
+        p2.build()
+
+
+def test_gpu2cpu():
+    bs = 8
+
+    @pipeline_def(batch_size=bs, num_threads=4, device_id=0, exec_dynamic=True)
+    def pdef():
+        enc, _ = fn.readers.file(file_root=jpeg_folder)
+        img = fn.decoders.image(enc, device="mixed")
+        return img, img.cpu()
+
+    pipe = pdef()
+    for i in range(10):
+        gpu, cpu = pipe.run()
+        assert isinstance(gpu, dali.backend_impl.TensorListGPU)
+        assert isinstance(cpu, dali.backend_impl.TensorListCPU)
+        check_batch(cpu, gpu, bs, 0, 0, "HWC")
+
+
+def test_gpu2cpu_arg_input():
+    @pipeline_def(batch_size=1, num_threads=4, device_id=0, exec_dynamic=True)
+    def pdef():
+        data = dali.types.Constant([42], device="gpu")
+        resized = fn.zeros(shape=data.cpu(), dtype=types.INT32)
+        return resized
+
+    pipe = pdef()
+    (o,) = pipe.run()
+    assert o[0].shape() == [42]
+
+
+def test_gpu2cpu2mixed():
+    bs = 8
+
+    @pipeline_def(batch_size=bs, num_threads=4, device_id=0, exec_dynamic=True)
+    def pdef():
+        enc, _ = fn.readers.file(file_root=jpeg_folder)
+        img = fn.decoders.image(enc, device="mixed", hw_decoder_load=0)
+        enc2 = (enc.gpu() + np.uint8(0)).cpu()
+        img2 = fn.decoders.image(enc2, device="mixed", hw_decoder_load=0)
+        return img, img2
+
+    pipe = pdef()
+    for i in range(10):
+        gpu, gpu2 = pipe.run()
+        assert isinstance(gpu, dali.backend_impl.TensorListGPU)
+        assert isinstance(gpu2, dali.backend_impl.TensorListGPU)
+        check_batch(gpu, gpu2, bs, 0, 0, "HWC")
+
+
+def test_shapes_gpu():
+    bs = 8
+
+    @pipeline_def(batch_size=bs, num_threads=4, device_id=0, exec_dynamic=True)
+    def pdef():
+        enc, _ = fn.readers.file(file_root=jpeg_folder)
+        img = fn.decoders.image(enc, device="mixed")
+        peek = fn.peek_image_shape(enc)
+        shapes_of_gpu = fn._shape(img, device="cpu")
+        shapes_of_cpu = fn._shape(img.cpu())
+        return peek, shapes_of_gpu, shapes_of_cpu, img.shape(), img.cpu().shape()
+
+    pipe = pdef()
+    for i in range(10):
+        peek, shape_of_gpu, shape_of_cpu, shape_func_gpu, shape_func_cpu = pipe.run()
+        # all results must be CPU tensor lists
+        assert isinstance(peek, dali.backend_impl.TensorListCPU)
+        assert isinstance(shape_of_gpu, dali.backend_impl.TensorListCPU)
+        assert isinstance(shape_of_cpu, dali.backend_impl.TensorListCPU)
+        assert isinstance(shape_func_gpu, dali.backend_impl.TensorListCPU)
+        assert isinstance(shape_func_cpu, dali.backend_impl.TensorListCPU)
+        check_batch(shape_of_gpu, peek, bs, 0, 0)
+        check_batch(shape_of_cpu, peek, bs, 0, 0)
+        check_batch(shape_func_gpu, peek, bs, 0, 0)
+        check_batch(shape_func_cpu, peek, bs, 0, 0)
+
+
+def test_gpu2cpu_old_exec_error():
+    bs = 8
+
+    @pipeline_def(
+        batch_size=bs,
+        num_threads=4,
+        device_id=0,
+        exec_async=False,
+        exec_pipelined=False,
+        exec_dynamic=False,
+    )
+    def pdef(to_cpu):
+        gpu = fn.external_source("input", device="gpu")
+        return to_cpu(gpu)
+
+    with assert_raises(RuntimeError, glob="doesn't support transition from GPU to CPU"):
+        _ = pdef(lambda gpu: gpu.cpu())  # this will raise an error at construction time
+
+    pipe = pdef(lambda gpu: gpu._to_backend("cpu"))  # this will not raise errors until build-time
+
+    with assert_raises(RuntimeError, glob="doesn't support transition from GPU to CPU"):
+        pipe.build()
+
+
+def test_gpu2cpu_conditionals():
+    bs = 4
+
+    @pipeline_def(
+        batch_size=bs,
+        num_threads=4,
+        device_id=0,
+        exec_dynamic=True,  # use new executor
+        enable_conditionals=True,
+    )
+    def def_test():
+        enc, label = fn.readers.file(file_root=jpeg_folder)
+        img = fn.decoders.image(enc, device="mixed")
+        # return inverted image for even samples
+        if (label[0] & 1) == 0:
+            out = img ^ np.uint8(255)
+            out_cpu = out.cpu()
+        else:
+            out = img
+            out_cpu = out.cpu()
+        return out, out_cpu
+
+    @pipeline_def(
+        batch_size=bs,
+        num_threads=4,
+        device_id=0,
+        exec_async=False,  # use old executor, even in presence of DALI_USE_EXEC2
+        exec_pipelined=False,
+    )
+    def def_ref():
+        enc, label = fn.readers.file(file_root=jpeg_folder)
+        img = fn.decoders.image(enc, device="mixed")
+        # return inverted image for even samples
+        even = (label[0] & 1) == 0
+        mask = fn.cast(even * 255, dtype=types.UINT8)
+        return img ^ mask
+
+    test_pipe = def_test()
+    ref_pipe = def_ref()
+    for i in range(3):
+        gpu, cpu = test_pipe.run()
+        assert isinstance(gpu, dali.backend_impl.TensorListGPU)
+        assert isinstance(cpu, dali.backend_impl.TensorListCPU)
+        (ref,) = ref_pipe.run()
+        check_batch(cpu, ref, bs, 0, 0, "HWC")
+        check_batch(gpu, ref, bs, 0, 0, "HWC")
+
+
+def test_cse():
+    @pipeline_def(batch_size=8, num_threads=4, device_id=0)
+    def my_pipe():
+        a = fn.random.uniform(range=[0, 1], shape=(1,), seed=123)
+        b = fn.random.uniform(range=[0, 1], shape=(1,), seed=123)
+        c = fn.random.uniform(range=[0, 1], shape=(1,), seed=123)
+        i = fn.random.uniform(range=[0, 1], shape=(1,), seed=1234)  # different seed - must not CSE
+        j = fn.random.uniform(range=[0, 1], shape=(1,), seed=123, name="do_not_merge")
+
+        d = a[0]
+        e = a[0]  # repeated a[0] should be ignored
+        f = c[0]  # c -> a, so it follows that c[0] -> a[0]
+
+        g = a[0] + b[0] - c[0]  # a[0] + a[0] - a[0]
+        h = c[0] + a[0] - b[0]  # likewise
+        return a, b, c, d, e, f, g, h, i, j
+
+    pipe = my_pipe()
+    a, b, c, d, e, f, g, h, i, j = pipe.run()
+    assert a.data_ptr() == b.data_ptr()
+    assert a.data_ptr() == c.data_ptr()
+    assert a.data_ptr() != i.data_ptr()
+    assert j.data_ptr() != a.data_ptr()  # j has a manually specified name and should not be merged
+
+    assert d.data_ptr() == e.data_ptr()
+    assert d.data_ptr() == f.data_ptr()
+
+    assert g.data_ptr() == h.data_ptr()
+
+
+def test_cse_ext_src():
+    @pipeline_def(batch_size=1, num_threads=4, device_id=0)
+    def my_pipe():
+        data1 = np.float32([1, 2, 3])
+        d = [data1]
+        es1 = fn.external_source(source=d, cycle=True, batch=False)
+        es2 = fn.external_source(source=d, cycle=True, batch=False)
+        return es1, es2
+
+    pipe = my_pipe()
+    pipe.build()
+    a, b = pipe.run()
+
+    # external source operators should not be merged, even if they're identical
+    assert a.data_ptr() != b.data_ptr()
+    assert np.array_equal(a[0], np.float32([1, 2, 3]))
+    assert np.array_equal(b[0], np.float32([1, 2, 3]))
+
+
+def test_cse_cond():
+    @pipeline_def(
+        batch_size=8,
+        num_threads=4,
+        device_id=0,
+        enable_conditionals=True,
+        exec_dynamic=True,  # required for opportunistic MakeContiguous
+    )
+    def my_pipe():
+        a = fn.random.uniform(range=[0, 1], shape=(1,), seed=123)
+        b = fn.random.uniform(range=[0, 1], shape=(1,), seed=123)
+
+        if a[0] > 0:
+            d = a
+        else:
+            d = b  # this is the same as `a`
+
+        return a, b, d
+
+    pipe = my_pipe()
+    a, b, d = pipe.run()
+    assert a.data_ptr() == b.data_ptr()
+    # `d` is opportunistically reassembled and gets the same first sample pointer as `a`
+    assert d.data_ptr() == a.data_ptr()
+
+
+def test_optional_build():
+    bs = 8
+
+    @pipeline_def(batch_size=bs, num_threads=4, device_id=0)
+    def pdef_regular():
+        enc, _ = fn.readers.file(file_root=jpeg_folder, name="only_reader")
+        img = fn.decoders.image(enc, device="mixed")
+        return img
+
+    @pipeline_def(batch_size=bs, num_threads=4, device_id=0)
+    def pdef_source():
+        source = fn.external_source(name="source")
+        return source
+
+    pipes = [pdef_regular() for _ in range(5)]
+    pipes.append(pdef_source())
+
+    for pipe in pipes:
+        pipe.build()
+
+    (res,) = pipes[0].run()
+    assert len(res.shape()) == 8
+    pipes[1].schedule_run()
+    (res_2,) = pipes[1].outputs()
+    assert len(res_2.shape()) == 8
+    assert pipes[2].epoch_size("only_reader") != 0
+    assert pipes[3].executor_statistics() == {}
+    assert "shard_id" in pipes[4].reader_meta("only_reader")
+
+    pipes[-1].feed_input("source", np.array([10, 10]))

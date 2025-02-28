@@ -14,7 +14,7 @@
 
 from nvidia.dali import pipeline_def
 from nvidia.dali.fn import readers
-from nose.tools import assert_equal
+from nose_utils import assert_equals
 import tempfile
 from subprocess import call
 import os
@@ -84,20 +84,22 @@ def file_reader_pipeline(
         exts = [exts]
 
     return tuple(
-        readers.file(
-            files=filter_ext(files, ext),
-            dont_use_mmap=dont_use_mmap,
-            prefetch_queue_depth=1,
-            num_shards=num_shards,
-            shard_id=shard_id,
-            stick_to_shard=stick_to_shard,
-            skip_cached_images=skip_cached_images,
-            pad_last_batch=pad_last_batch,
-            lazy_init=lazy_init,
-            read_ahead=read_ahead,
-        )[0]
-        if type(ext) in {str, set}
-        else ext
+        (
+            readers.file(
+                files=filter_ext(files, ext),
+                dont_use_mmap=dont_use_mmap,
+                prefetch_queue_depth=1,
+                num_shards=num_shards,
+                shard_id=shard_id,
+                stick_to_shard=stick_to_shard,
+                skip_cached_images=skip_cached_images,
+                pad_last_batch=pad_last_batch,
+                lazy_init=lazy_init,
+                read_ahead=read_ahead,
+            )[0]
+            if type(ext) in {str, set}
+            else ext
+        )
         for ext in exts
     )
 
@@ -105,7 +107,7 @@ def file_reader_pipeline(
 def generate_temp_index_file(tar_file_path):
     global wds2idx_script
     temp_index_file = tempfile.NamedTemporaryFile()
-    assert_equal(
+    assert_equals(
         call([wds2idx_script, tar_file_path, temp_index_file.name], stdout=open(os.devnull, "wb")),
         0,
     )

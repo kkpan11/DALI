@@ -1,4 +1,4 @@
-# Copyright (c) 2019-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2019-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,15 +17,12 @@ from nvidia.dali import pipeline_def, fn
 import nvidia.dali.ops as ops
 import nvidia.dali.types as types
 import nvidia.dali.math as math
-from nvidia.dali.tensors import TensorListGPU
 import numpy as np
-from nose.tools import assert_equals
-from nose.plugins.attrib import attr
+from nose_utils import attr, raises, assert_raises, assert_equals
 from nose2.tools import params
 import itertools
 
 from test_utils import np_type_to_dali
-from nose_utils import raises, assert_raises
 
 
 def list_product(*args):
@@ -226,12 +223,6 @@ comparisons_operations = [
 ternary_operations = [
     (((lambda v, lo, hi: math.clamp(v, lo, hi)), (lambda v, lo, hi: np.clip(v, lo, hi))), "clamp")
 ]
-
-
-def as_cpu(tl):
-    if isinstance(tl, TensorListGPU):
-        return tl.as_cpu()
-    return tl
 
 
 def max_dtype(kind, left_dtype, right_dtype):
@@ -451,8 +442,8 @@ def get_numpy_input(input, kind, orig_type, target_type):
 
 
 def extract_un_data(pipe_out, sample_id, kind, target_type):
-    input = as_cpu(pipe_out[0]).at(sample_id)
-    out = as_cpu(pipe_out[1]).at(sample_id)
+    input = np.array(pipe_out[0][sample_id].as_cpu())
+    out = np.array(pipe_out[1][sample_id].as_cpu())
     assert_equals(out.dtype, target_type)
     in_np = get_numpy_input(input, kind, input.dtype.type, target_type)
     return in_np, out
@@ -467,7 +458,7 @@ def extract_data(pipe_out, sample_id, kinds, target_type):
     arity = len(kinds)
     inputs = []
     for i in range(arity):
-        dali_in = as_cpu(pipe_out[i]).at(sample_id)
+        dali_in = np.array(pipe_out[i][sample_id].as_cpu())
         numpy_in = get_numpy_input(
             dali_in,
             kinds[i],
@@ -475,7 +466,7 @@ def extract_data(pipe_out, sample_id, kinds, target_type):
             target_type if target_type is not None else dali_in.dtype.type,
         )
         inputs.append(numpy_in)
-    out = as_cpu(pipe_out[arity]).at(sample_id)
+    out = np.array(pipe_out[arity][sample_id].as_cpu())
     return tuple(inputs) + (out,)
 
 
@@ -485,7 +476,6 @@ def check_unary_op(kind, type, op, shape, _):
     pipe = ExprOpPipeline(
         kind, type, iterator, op, batch_size=batch_size, num_threads=2, device_id=0
     )
-    pipe.build()
     pipe_out = pipe.run()
     for sample in range(batch_size):
         in_np, out = extract_un_data(pipe_out, sample, kind, type)
@@ -518,7 +508,6 @@ def check_math_function_op(kind, type, op, np_op, shape, get_range, op_desc, eps
     pipe = ExprOpPipeline(
         kind, type, iterator, op, batch_size=batch_size, num_threads=2, device_id=0
     )
-    pipe.build()
     pipe_out = pipe.run()
     out_type = np.float32 if is_integer else type
     for sample in range(batch_size):
@@ -579,7 +568,6 @@ def check_arithm_op(kinds, types, op, shape, get_range, op_desc):
     pipe = ExprOpPipeline(
         kinds, types, iterator, dali_op, batch_size=batch_size, num_threads=2, device_id=0
     )
-    pipe.build()
     pipe_out = pipe.run()
     for sample in range(batch_size):
         l_np, r_np, out = extract_data(pipe_out, sample, kinds, target_type)
@@ -603,7 +591,6 @@ def check_ternary_op(kinds, types, op, shape, _):
     pipe = ExprOpPipeline(
         kinds, types, iterator, dali_op, batch_size=batch_size, num_threads=2, device_id=0
     )
-    pipe.build()
     pipe_out = pipe.run()
     for sample in range(batch_size):
         x, y, z, out = extract_data(pipe_out, sample, kinds, target_type)
@@ -711,7 +698,6 @@ def check_comparsion_op(kinds, types, op, shape, _):
     pipe = ExprOpPipeline(
         kinds, types, iterator, op, batch_size=batch_size, num_threads=2, device_id=0
     )
-    pipe.build()
     pipe_out = pipe.run()
     for sample in range(batch_size):
         l_np, r_np, out = extract_data(pipe_out, sample, kinds, None)
@@ -757,7 +743,6 @@ def check_arithm_binary_float(kinds, types, op, shape, get_range, _):
     pipe = ExprOpPipeline(
         kinds, types, iterator, dali_op, batch_size=batch_size, num_threads=2, device_id=0
     )
-    pipe.build()
     pipe_out = pipe.run()
     for sample in range(batch_size):
         l_np, r_np, out = extract_data(pipe_out, sample, kinds, target_type)
@@ -824,7 +809,6 @@ def check_arithm_div(kinds, types, shape):
         num_threads=2,
         device_id=0,
     )
-    pipe.build()
     pipe_out = pipe.run()
     for sample in range(batch_size):
         l_np, r_np, out = extract_data(pipe_out, sample, kinds, target_type)
@@ -872,7 +856,6 @@ def check_raises(kinds, types, op, shape):
     pipe = ExprOpPipeline(
         kinds, types, iterator, dali_op, batch_size=batch_size, num_threads=2, device_id=0
     )
-    pipe.build()
     pipe.run()
 
 
@@ -1108,7 +1091,6 @@ def test_layout_broadcasting(op_name, args_desc, out_desc, in_devs, in_types, op
         return op(*in_nodes)
 
     p = pipeline()
-    p.build()
     if isinstance(out_desc, Exception):
         with assert_raises(Exception, glob="They must be equal or one must be a suffix"):
             p.run()
@@ -1134,7 +1116,6 @@ def test_broadcasting_dimensionality_limits():
             return a + b
 
         p = pipe()
-        p.build()
         p.run()
 
     # ERROR
@@ -1165,7 +1146,6 @@ def test_broadcasting_incompatible_shapes():
             return a + b
 
         p = pipe()
-        p.build()
         p.run()
 
     error_msg1 = (
@@ -1189,3 +1169,53 @@ def test_broadcasting_incompatible_shapes():
     for device in ["cpu", "gpu"]:
         with assert_raises(RuntimeError, glob=error_msg2):
             impl(device, shape_a2, shape_b2)
+
+
+def test_nested_datanode_error_math():
+    @pipeline_def(device_id=None, batch_size=1, num_threads=4)
+    def err_pipe():
+        u = fn.random.uniform(range=[0, 1])
+        v = fn.random.uniform(range=[0, 1])
+        return math.max([u, v], 5)
+
+    with assert_raises(
+        TypeError, glob="input 0 of operator `max` must be*" "Got a `list` with nested *DataNode"
+    ):
+        _ = err_pipe()
+
+
+@params(
+    *(
+        (x,)
+        for x in ("+", "-", "*", "/", "//", "**", "&", "|", "^", "==", "!=", "<", ">", "<=", ">=")
+    )
+)
+def test_nested_datanode_error_arithm(op):
+    print(op)
+
+    @pipeline_def(device_id=None, batch_size=1, num_threads=4)
+    def err_pipe():
+        u = fn.random.uniform(range=[0, 1])  # noqa(F841)
+        v = fn.random.uniform(range=[0, 1])  # noqa(F841)
+        return eval(f"u {op} [v]")
+
+    with assert_raises(
+        TypeError, glob=f"input 1 of operator `{op}` must be*" "Got a `list` with nested *DataNode"
+    ):
+        _ = err_pipe()
+
+
+@params(("cpu",), ("gpu",))
+def test_empty_batch(device):
+    @pipeline_def(
+        device_id=0 if device == "gpu" else None,
+        batch_size=1,
+        num_threads=4,
+    )
+    def empty_input_pipe():
+        x = types.Constant(np.zeros((0, 3), dtype=np.float32), device=device)
+        return x * 42
+
+    p = empty_input_pipe()
+    (o,) = p.run()
+    assert tuple(o[0].shape()) == (0, 3)

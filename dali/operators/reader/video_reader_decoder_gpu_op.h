@@ -29,12 +29,13 @@ class VideoReaderDecoderGpu : public DataReader<GPUBackend, VideoSampleGpu, Vide
 
   void RunImpl(Workspace &ws) override;
 
-  bool CanInferOutputs() const override { return true; }
+  bool HasContiguousOutputs() const override { return true; }
 
   void Prefetch() override;
 
  private:
   bool has_labels_ = false;
+  bool has_frame_idx_  = false;
 };
 
 }  // namespace dali

@@ -1,4 +1,4 @@
-# Copyright (c) 2019-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2019-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -22,7 +22,7 @@ from nvidia.dali.pipeline import Pipeline, pipeline_def
 import nvidia.dali.fn as fn
 import numpy as np
 import tempfile
-from test_utils import check_output_pattern
+from test_utils import check_output_pattern, skip_if_m60
 
 from nose_utils import assert_raises, raises
 
@@ -123,7 +123,6 @@ class VideoPipeRoot(Pipeline):
 
 def test_simple_videopipeline():
     pipe = VideoPipe(batch_size=BATCH_SIZE, data=VIDEO_FILES)
-    pipe.build()
     for i in range(ITER):
         print("Iter " + str(i))
         out = pipe.run()
@@ -139,7 +138,6 @@ def test_wrong_length_sequence_videopipeline():
 
 def check_videopipeline_supported_type(dtype):
     pipe = VideoPipe(batch_size=BATCH_SIZE, data=VIDEO_FILES, dtype=dtype)
-    pipe.build()
     for i in range(ITER):
         print("Iter " + str(i))
         _ = pipe.run()
@@ -168,7 +166,6 @@ def test_simple_videopipeline_not_supported_types():
 
 def test_file_list_videopipeline():
     pipe = VideoPipeList(batch_size=BATCH_SIZE, data=FILE_LIST)
-    pipe.build()
     for i in range(ITER):
         print("Iter " + str(i))
         _ = pipe.run()
@@ -182,7 +179,6 @@ def _test_file_list_starts_videopipeline(start, end):
     list_file.close()
 
     pipe = VideoPipeList(batch_size=BATCH_SIZE, data=list_file.name, sequence_length=1)
-    pipe.build()
     reference_seq_num = pipe.reader_meta("Reader")["epoch_size"]
     del pipe
     os.remove(list_file.name)
@@ -197,7 +193,6 @@ def _test_file_list_starts_videopipeline(start, end):
     list_file.close()
 
     pipe = VideoPipeList(batch_size=BATCH_SIZE, data=list_file.name, sequence_length=1)
-    pipe.build()
     seq_num = pipe.reader_meta("Reader")["epoch_size"]
 
     expected_seq_num = reference_seq_num
@@ -238,7 +233,6 @@ def test_source_info():
     pipe = VideoPipeList(
         batch_size=BATCH_SIZE, data=list_file.name, sequence_length=1, skip_vfr_check=True
     )
-    pipe.build()
     samples_read = 0
     while samples_read < len(files):
         o = pipe.run()
@@ -329,7 +323,6 @@ def test_file_list_empty_range():
 
 def test_step_video_pipeline():
     pipe = VideoPipe(batch_size=BATCH_SIZE, data=VIDEO_FILES, step=1)
-    pipe.build()
     for i in range(ITER):
         print("Iter " + str(i))
         _ = pipe.run()
@@ -338,7 +331,6 @@ def test_step_video_pipeline():
 
 def test_stride_video_pipeline():
     pipe = VideoPipe(batch_size=BATCH_SIZE, data=VIDEO_FILES, stride=3)
-    pipe.build()
     for i in range(ITER):
         print("Iter " + str(i))
         _ = pipe.run()
@@ -348,7 +340,6 @@ def test_stride_video_pipeline():
 def test_multiple_resolution_videopipeline():
     pipe = VideoPipeRoot(batch_size=BATCH_SIZE, data=MUTLIPLE_RESOLUTION_ROOT)
     try:
-        pipe.build()
         for i in range(ITER):
             print("Iter " + str(i))
             _ = pipe.run()
@@ -367,7 +358,6 @@ def test_multi_gpu_video_pipeline():
         for d in range(gpus)
     ]
     for p in pipes:
-        p.build()
         p.run()
 
 
@@ -379,7 +369,6 @@ def test_plenty_of_video_files():
     pipe = VideoPipe(
         batch_size=BATCH_SIZE, data=PLENTY_VIDEO_FILES, step=1000000, sequence_length=1
     )
-    pipe.build()
     iters = math.ceil(len(os.listdir(PLENTY_VIDEO_DIRECTORY)) / BATCH_SIZE)
     for i in range(iters):
         print("Iter " + str(i))
@@ -393,7 +382,6 @@ def check_corrupted_videos(reader, wrong_video, msg):
         vid = reader([wrong_video, good_video])
         pipe.set_outputs(vid)
     with check_output_pattern(pattern=msg):
-        pipe.build()
         pipe.run()
 
 
@@ -422,15 +410,6 @@ def test_corrupted_videos():
             yield check_corrupted_videos, reader, wrong_video, msg
 
 
-def test_unsupported_codec():
-    def reader_fn(files):
-        return fn.experimental.readers.video(device="cpu", filenames=files, sequence_length=3)
-
-    wrong_video = os.path.join(video_data_root, "vp9", "vp9_0.mp4")
-    msg = "Unsupported video codec"
-    yield check_corrupted_videos, reader_fn, wrong_video, msg
-
-
 def check_container(cont):
     pipe = Pipeline(batch_size=1, num_threads=4, device_id=0)
     path = os.path.join(video_containers_data_root, cont)
@@ -446,7 +425,6 @@ def check_container(cont):
             name="Reader",
         )
         pipe.set_outputs(vid)
-    pipe.build()
 
     iter_num = pipe.reader_meta("Reader")["epoch_size"]
     for _ in range(iter_num):
@@ -487,7 +465,6 @@ def test_pad_sequence():
         os.path.join(video_data_root, "sintel", "video_files", "sintel_trailer-720p_2.mp4")
     ]
     dali_pipe = create_video_pipe(video_filename)
-    dali_pipe.build()
     total_number_of_frames = get_epoch_size(dali_pipe)
 
     sequence_length = 4
@@ -503,7 +480,6 @@ def test_pad_sequence():
         step=step,
         pad_sequences=True,
     )
-    dali_pipe.build()
     assert get_epoch_size(dali_pipe) == 2
 
     last_sample_frame_count = 1 + (total_number_of_frames - 1 - step) // stride
@@ -532,7 +508,6 @@ def test_pad_sequence():
         step=step,
         pad_sequences=False,
     )
-    dali_pipe.build()
     # when sequence padding if off we should get only one valid sample in the epoch
     assert get_epoch_size(dali_pipe) == 1
 
@@ -544,7 +519,6 @@ def test_pad_sequence():
     dali_pipe = create_video_pipe(
         batch_size=1, filenames=video_filename, sequence_length=1, stride=1, pad_sequences=False
     )
-    dali_pipe.build()
 
     # to speed things up read as close as 30 frames at the time, but in the way that the sequences
     # cover the whole video (without padding)
@@ -558,7 +532,6 @@ def test_pad_sequence():
         stride=1,
         pad_sequences=False,
     )
-    dali_pipe.build()
     ts_index = 0
     sampl_idx = 0
     for _ in range(get_epoch_size(dali_pipe)):
@@ -590,6 +563,7 @@ def test_pad_sequence():
 
 
 def test_10bit_vid_reconfigure():
+    skip_if_m60()
     batch_size = 1
     sequence_length = 5
     iter = 5
@@ -621,10 +595,30 @@ def test_10bit_vid_reconfigure():
         return a, b
 
     pipe = video_decoder_pipeline(batch_size=batch_size, num_threads=1, device_id=0)
-    pipe.build()
     for _ in range(iter):
         (a, b) = pipe.run()
         a = a.as_cpu().as_array()
         b = b.as_cpu().as_array()
         absdiff = np.abs(a.astype(int) - b.astype(int))
         assert np.mean(absdiff) < 2, f"error is {np.mean(absdiff)}"
+
+
+def test_2gb_sequence():
+    skip_if_m60()
+    # make sure the sequence exceeds beyond 2GB
+    sequence_length = int(math.ceil((1 << 31) / 720 / 1280 / 3) + 3)
+
+    @pipeline_def
+    def video_pipe():
+        video, label = fn.readers.video(
+            device="gpu",
+            sequence_length=sequence_length,
+            filenames=os.path.join(video_data_root, "hevc", "sintel_trailer-720p.mp4"),
+            labels=[],
+        )
+        return video, label
+
+    batch_size = 1
+    pipe = video_pipe(batch_size=batch_size, num_threads=1, device_id=0)
+    for _ in range(2):
+        pipe.run()

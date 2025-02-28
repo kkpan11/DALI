@@ -44,7 +44,7 @@ TensorCPU
 .. autoclass:: TensorCPU
    :members:
    :undoc-members:
-   :special-members: __init__, __array_interface__
+   :special-members: __init__, __array_interface__, __dlpack__, __dlpack_device__
 
    .. method:: dtype(self: nvidia.dali.tensors.TensorCPU) -> str
 
@@ -59,7 +59,7 @@ TensorGPU
 .. autoclass:: TensorGPU
    :members:
    :undoc-members:
-   :special-members: __init__, __cuda_array_interface__
+   :special-members: __init__, __cuda_array_interface__, __dlpack__, __dlpack_device__
 
    .. method:: dtype(self: nvidia.dali.tensors.TensorCPU) -> str
 
@@ -97,9 +97,10 @@ DALIDataType
    :member-order: bysource
    :exclude-members: name
 
+.. autofunction:: to_numpy_type
+
 DALIIterpType
 ^^^^^^^^^^^^^
-.. autofunction:: to_numpy_type
 .. autoenum:: DALIInterpType
    :members:
    :undoc-members:

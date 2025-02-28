@@ -1,4 +1,4 @@
-// Copyright (c) 2017-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2017-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -64,10 +64,6 @@ class ExternalSource : public InputOperator<Backend> {
 
   virtual ~ExternalSource() = default;
 
-  inline string name() const override {
-    return "ExternalSource (" + output_name_ + ")";
-  }
-
   const TensorLayout& in_layout() const override {
     return layout_;
   }
@@ -114,9 +110,7 @@ class ExternalSource : public InputOperator<Backend> {
   }
 
 
-  bool CanInferOutputs() const override {
-    // shape inference during setup is disabled because it can be calculated during the runtime
-    // depending on the input and output
+  bool HasContiguousOutputs() const override {
     return false;
   }
 

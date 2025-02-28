@@ -6,7 +6,7 @@ mkdir -p idx-files/
 
 NUM_GPUS=$(nvidia-smi -L | wc -l)
 
-DATA_SET_DIR=/data/imagenet/train-val-tfrecord
+DATA_SET_DIR=/data_raid/imagenet/train-val-tfrecord
 for file in $(ls $DATA_SET_DIR/*-of-*);
 do
     file=$(basename ${file})
@@ -25,6 +25,10 @@ OUT=${LOG%.log}.dir
 mkdir -p $OUT
 
 SECONDS=0
+
+# turn off SHARP to avoid NCCL errors
+export NCCL_NVLS_ENABLE=0
+
 export TF_XLA_FLAGS="--tf_xla_enable_lazy_compilation=false"
 
 mpiexec --allow-run-as-root --bind-to none -np ${NUM_GPUS} \

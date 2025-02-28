@@ -31,6 +31,7 @@ export BUILD_BENCHMARK=${BUILD_BENCHMARK:-ON}
 export BUILD_NVTX=${BUILD_NVTX}
 export BUILD_PYTHON=${BUILD_PYTHON:-ON}
 export BUILD_LMDB=${BUILD_LMDB:-ON}
+export BUILD_NVIMAGECODEC=${BUILD_NVIMAGECODEC:-ON}
 export BUILD_JPEG_TURBO=${BUILD_JPEG_TURBO:-ON}
 export BUILD_OPENCV=${BUILD_OPENCV:-ON}
 export BUILD_PROTOBUF=${BUILD_PROTOBUF:-ON}
@@ -53,6 +54,7 @@ export WITH_DYNAMIC_CUDA_TOOLKIT=${WITH_DYNAMIC_CUDA_TOOLKIT:-OFF}
 export WITH_DYNAMIC_NVJPEG=${WITH_DYNAMIC_NVJPEG:-ON}
 export WITH_DYNAMIC_CUFFT=${WITH_DYNAMIC_CUFFT:-ON}
 export WITH_DYNAMIC_NPP=${WITH_DYNAMIC_NPP:-ON}
+export WITH_DYNAMIC_NVIMGCODEC=${WITH_DYNAMIC_NVIMGCODEC:-ON}
 export STRIP_BINARY=${STRIP_BINARY:-OFF}
 export VERBOSE_LOGS=${VERBOSE_LOGS:-OFF}
 export WERROR=${WERROR:-ON}
@@ -72,9 +74,8 @@ export EXTRA_CMAKE_OPTIONS=${EXTRA_CMAKE_OPTIONS}
 export BUNDLE_PATH_PREFIX=${BUNDLE_PATH_PREFIX}
 export TEST_BUNDLED_LIBS=${TEST_BUNDLED_LIBS:-YES}
 export PYTHON_VERSIONS=${PYTHON_VERSIONS}
-# use all avialble pythons
+# use all available pythons
 
-LD_LIBRARY_PATH="${PWD}:${LD_LIBRARY_PATH}" && \
 cmake ../ -DCMAKE_INSTALL_PREFIX=.                 \
       -DARCH=${ARCH}                               \
       -DCUDA_TARGET_ARCHS=${CUDA_TARGET_ARCHS}     \
@@ -84,6 +85,7 @@ cmake ../ -DCMAKE_INSTALL_PREFIX=.                 \
       -DBUILD_NVTX=${BUILD_NVTX}                   \
       -DBUILD_PYTHON=${BUILD_PYTHON}               \
       -DBUILD_LMDB=${BUILD_LMDB}                   \
+      -DBUILD_NVIMAGECODEC=${BUILD_NVIMAGECODEC}   \
       -DBUILD_JPEG_TURBO=${BUILD_JPEG_TURBO}       \
       -DBUILD_OPENCV=${BUILD_OPENCV}               \
       -DBUILD_PROTOBUF=${BUILD_PROTOBUF}           \
@@ -104,6 +106,7 @@ cmake ../ -DCMAKE_INSTALL_PREFIX=.                 \
       -DWITH_DYNAMIC_NVJPEG=${WITH_DYNAMIC_NVJPEG} \
       -DWITH_DYNAMIC_CUFFT=${WITH_DYNAMIC_CUFFT}   \
       -DWITH_DYNAMIC_NPP=${WITH_DYNAMIC_NPP}       \
+      -DWITH_DYNAMIC_NVIMGCODEC=${WITH_DYNAMIC_NVIMGCODEC} \
       -DVERBOSE_LOGS=${VERBOSE_LOGS}               \
       -DWERROR=${WERROR}                           \
       -DBUILD_WITH_ASAN=${BUILD_WITH_ASAN}         \
@@ -141,9 +144,8 @@ if [ "${BUILD_PYTHON}" = "ON" ]; then
     python setup.py bdist_wheel \
         --verbose \
         --compression=stored \
-        --python-tag=py3-none \
-        --plat-name=${WHL_PLATFORM_NAME} \
-        --build-number=${NVIDIA_BUILD_ID}
+        --python-tag=py3 \
+        --plat-name=${WHL_PLATFORM_NAME}
     popd
     mv dali/python/dist/*.whl ./
 

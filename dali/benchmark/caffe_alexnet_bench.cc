@@ -1,4 +1,4 @@
-// Copyright (c) 2017-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2017-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -46,35 +46,35 @@ BENCHMARK_DEFINE_F(Alexnet, CaffePipe)(benchmark::State& st) { // NOLINT
       OpSpec("CaffeReader")
       .AddArg("device", "cpu")
       .AddArg("path", path)
-      .AddOutput("compressed_images", "cpu")
-      .AddOutput("labels", "cpu"));
+      .AddOutput("compressed_images", StorageDevice::CPU)
+      .AddOutput("labels", StorageDevice::CPU));
 
   pipe.AddOperator(
       OpSpec("ImageDecoder")
       .AddArg("device", "cpu")
       .AddArg("output_type", img_type)
-      .AddInput("compressed_images", "cpu")
-      .AddOutput("images", "cpu"));
+      .AddInput("compressed_images", StorageDevice::CPU)
+      .AddOutput("images", StorageDevice::CPU));
 
   // Add uniform RNG
   pipe.AddOperator(
       OpSpec("Uniform")
       .AddArg("device", "cpu")
       .AddArg("range", vector<float>{0, 1})
-      .AddOutput("uniform1", "cpu"));
+      .AddOutput("uniform1", StorageDevice::CPU));
 
   pipe.AddOperator(
       OpSpec("Uniform")
       .AddArg("device", "cpu")
       .AddArg("range", vector<float>{0, 1})
-      .AddOutput("uniform2", "cpu"));
+      .AddOutput("uniform2", StorageDevice::CPU));
 
   // Add coin flip RNG for mirror mask
   pipe.AddOperator(
       OpSpec("CoinFlip")
       .AddArg("device", "cpu")
       .AddArg("probability", 0.5f)
-      .AddOutput("mirror", "cpu"));
+      .AddOutput("mirror", StorageDevice::CPU));
 
   // Add a resize+crop+mirror op
   pipe.AddOperator(
@@ -84,11 +84,11 @@ BENCHMARK_DEFINE_F(Alexnet, CaffePipe)(benchmark::State& st) { // NOLINT
       .AddArg("resize_y", 256)
       .AddArg("crop", vector<float>{224, 224})
       .AddArg("antialias", false)
-      .AddInput("images", "cpu")
+      .AddInput("images", StorageDevice::CPU)
       .AddArgumentInput("crop_pos_x", "uniform1")
       .AddArgumentInput("crop_pos_y", "uniform2")
       .AddArgumentInput("mirror", "mirror")
-      .AddOutput("resized", "cpu"));
+      .AddOutput("resized", StorageDevice::CPU));
 
   pipe.AddOperator(
       OpSpec("CropMirrorNormalize")
@@ -96,8 +96,8 @@ BENCHMARK_DEFINE_F(Alexnet, CaffePipe)(benchmark::State& st) { // NOLINT
       .AddArg("dtype", DALI_FLOAT16)
       .AddArg("mean", vector<float>{128, 128, 128})
       .AddArg("std", vector<float>{1, 1, 1})
-      .AddInput("resized", "gpu")
-      .AddOutput("final_batch", "gpu"));
+      .AddInput("resized", StorageDevice::GPU)
+      .AddOutput("final_batch", StorageDevice::GPU));
 
   // Build and run the pipeline
   vector<std::pair<string, string>> outputs = {{"final_batch", "gpu"}};
@@ -107,8 +107,7 @@ BENCHMARK_DEFINE_F(Alexnet, CaffePipe)(benchmark::State& st) { // NOLINT
 
   // Run once to allocate the memory
   Workspace ws;
-  pipe.RunCPU();
-  pipe.RunGPU();
+  pipe.Run();
   pipe.Outputs(&ws);
 
   while (st.KeepRunning()) {
@@ -116,11 +115,9 @@ BENCHMARK_DEFINE_F(Alexnet, CaffePipe)(benchmark::State& st) { // NOLINT
       // We will start he processing for the next batch
       // immediately after issueing work to the gpu to
       // pipeline the cpu/copy/gpu work
-      pipe.RunCPU();
-      pipe.RunGPU();
+      pipe.Run();
     }
-    pipe.RunCPU();
-    pipe.RunGPU();
+    pipe.Run();
     pipe.Outputs(&ws);
 
     if (st.iterations() == st.max_iterations && pipelined) {
@@ -172,16 +169,16 @@ BENCHMARK_DEFINE_F(Alexnet, HybridPipe)(benchmark::State& st) { // NOLINT
       OpSpec("CaffeReader")
       .AddArg("device", "cpu")
       .AddArg("path", "/data/imagenet-compressed/256px/ilsvrc12_train_lmdb")
-      .AddOutput("compressed_images", "cpu")
-      .AddOutput("labels", "cpu"));
+      .AddOutput("compressed_images", StorageDevice::CPU)
+      .AddOutput("labels", StorageDevice::CPU));
 
   // Add a hybrid jpeg decoder
   pipe.AddOperator(
       OpSpec("ImageDecoder")
       .AddArg("device", "mixed")
       .AddArg("output_type", img_type)
-      .AddInput("compressed_images", "cpu")
-      .AddOutput("images", "gpu"));
+      .AddInput("compressed_images", StorageDevice::CPU)
+      .AddOutput("images", StorageDevice::GPU));
 
   // Add a batched resize op
 #if 0
@@ -194,8 +191,8 @@ BENCHMARK_DEFINE_F(Alexnet, HybridPipe)(benchmark::State& st) { // NOLINT
       .AddArg("resize_b", 256)
       .AddArg("image_type", img_type)
       .AddArg("interp_type", DALI_INTERP_LINEAR)
-      .AddInput("images", "gpu")
-      .AddOutput("resized", "gpu"));
+      .AddInput("images", StorageDevice::GPU)
+      .AddOutput("resized", StorageDevice::GPU));
 #endif
 
   // Add uniform RNG
@@ -203,20 +200,20 @@ BENCHMARK_DEFINE_F(Alexnet, HybridPipe)(benchmark::State& st) { // NOLINT
       OpSpec("Uniform")
       .AddArg("device", "cpu")
       .AddArg("range", vector<float>{0, 1})
-      .AddOutput("uniform1", "cpu"));
+      .AddOutput("uniform1", StorageDevice::CPU));
 
   pipe.AddOperator(
       OpSpec("Uniform")
       .AddArg("device", "cpu")
       .AddArg("range", vector<float>{0, 1})
-      .AddOutput("uniform2", "cpu"));
+      .AddOutput("uniform2", StorageDevice::CPU));
 
   // Add coin flip RNG for mirror mask
   pipe.AddOperator(
       OpSpec("CoinFlip")
       .AddArg("device", "cpu")
       .AddArg("probability", 0.5f)
-      .AddOutput("mirror", "cpu"));
+      .AddOutput("mirror", StorageDevice::CPU));
 
   // Add a batched crop+mirror+normalize+permute op
   pipe.AddOperator(
@@ -226,11 +223,11 @@ BENCHMARK_DEFINE_F(Alexnet, HybridPipe)(benchmark::State& st) { // NOLINT
       .AddArg("crop", vector<float>{224, 224})
       .AddArg("mean", vector<float>{128, 128, 128})
       .AddArg("std", vector<float>{1, 1, 1})
-      .AddInput("images", "gpu")
+      .AddInput("images", StorageDevice::GPU)
       .AddArgumentInput("crop_pos_x", "uniform1")
       .AddArgumentInput("crop_pos_y", "uniform2")
       .AddArgumentInput("mirror", "mirror")
-      .AddOutput("final", "gpu"));
+      .AddOutput("final", StorageDevice::GPU));
 
   // Build and run the pipeline
   vector<std::pair<string, string>> outputs = {{"final", "gpu"}};
@@ -238,8 +235,7 @@ BENCHMARK_DEFINE_F(Alexnet, HybridPipe)(benchmark::State& st) { // NOLINT
 
   // Run once to allocate the memory
   Workspace ws;
-  pipe.RunCPU();
-  pipe.RunGPU();
+  pipe.Run();
   pipe.Outputs(&ws);
 
   while (st.KeepRunning()) {
@@ -247,11 +243,9 @@ BENCHMARK_DEFINE_F(Alexnet, HybridPipe)(benchmark::State& st) { // NOLINT
       // We will start he processing for the next batch
       // immediately after issueing work to the gpu to
       // pipeline the cpu/copy/gpu work
-      pipe.RunCPU();
-      pipe.RunGPU();
+      pipe.Run();
     }
-    pipe.RunCPU();
-    pipe.RunGPU();
+    pipe.Run();
     pipe.Outputs(&ws);
 
     if (st.iterations() == st.max_iterations && pipelined) {

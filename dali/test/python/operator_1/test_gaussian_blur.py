@@ -1,4 +1,4 @@
-# Copyright (c) 2020-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2020-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -21,8 +21,7 @@ import numpy as np
 import cv2
 from scipy.ndimage import convolve1d
 import os
-from nose_utils import assert_raises, raises
-from nose.plugins.attrib import attr
+from nose_utils import assert_raises, raises, attr
 
 from sequences_test_utils import video_suite_helper, ArgCb
 from test_utils import (
@@ -125,7 +124,6 @@ def get_gaussian_pipe(batch_size, sigma, window_size, op_type):
 
 def check_gaussian_blur(batch_size, sigma, window_size, op_type="cpu"):
     pipe = get_gaussian_pipe(batch_size, sigma, window_size, op_type)
-    pipe.build()
     for _ in range(test_iters):
         result, input = pipe.run()
         if op_type == "gpu":
@@ -222,7 +220,6 @@ def check_generic_gaussian_blur(
             input, device=op_type, sigma=sigma, window_size=window_size, dtype=out_dtype
         )
         pipe.set_outputs(blurred, input)
-    pipe.build()
 
     for _ in range(test_iters):
         result, input = pipe.run()
@@ -320,6 +317,7 @@ def slow_test_generic_gaussian_blur():
                 yield from generate_generic_cases(dev, t_in, t_out)
 
 
+@attr("sanitizer_skip")
 def check_per_sample_gaussian_blur(
     batch_size, sigma_dim, window_size_dim, shape, layout, axes, op_type="cpu"
 ):
@@ -347,7 +345,6 @@ def check_per_sample_gaussian_blur(
             input = input.gpu()
         blurred = fn.gaussian_blur(input, device=op_type, sigma=sigma_arg, window_size=window_arg)
         pipe.set_outputs(blurred, input, sigma, window_size)
-    pipe.build()
 
     for _ in range(test_iters):
         result, input, sigma, window_size = pipe.run()
@@ -524,6 +521,7 @@ def test_fail_gaussian_blur():
     )
 
 
+@attr("sanitizer_skip")
 def test_per_frame():
     def window_size(sample_desc):
         return np.array(2 * sample_desc.rng.randint(1, 15) + 1, dtype=np.int32)
@@ -580,5 +578,4 @@ def test_fail_per_frame_no_frames():
         return fn.gaussian_blur(image, window_size=fn.per_frame(per_channel))
 
     pipe = pipeline(batch_size=8, num_threads=4, device_id=0)
-    pipe.build()
     pipe.run()

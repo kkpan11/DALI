@@ -1,4 +1,4 @@
-// Copyright (c) 2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2023-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,8 +13,6 @@
 // limitations under the License.
 
 #include <gtest/gtest.h>
-#include <thrust/host_vector.h>
-#include <thrust/device_vector.h>
 #include <memory>
 #include <string>
 #include <utility>
@@ -22,6 +20,8 @@
 #include "dali/c_api.h"
 #include "dali/pipeline/pipeline.h"
 #include "dali/test/dali_test_config.h"
+#include "dali/test/test_tensors.h"
+#include "dali/test/tensor_test_utils.h"
 
 namespace dali::test {
 
@@ -50,20 +50,10 @@ InputOperatorMixedTestParam input_operator_test_params_pipelined_executor_unifor
 
 InputOperatorMixedTestParam input_operator_test_params_pipelined_executor_separate_queue[] = {
         {2, 3, true, false, true},
-        {3, 2, true, false, false},
+        {2, 2, true, false, false},
         {2, 3, true, true,  true},
         {3, 2, true, true,  false},
 };
-
-
-template<typename T>
-thrust::host_vector<T> random_vector_cpu(std::mt19937 &mt, size_t size) {
-  thrust::host_vector<T> cpu(size);
-  std::uniform_int_distribution<T> dist{0, 255};
-  auto gen = [&]() { return dist(mt); };
-  thrust::generate(cpu.begin(), cpu.end(), gen);
-  return cpu;
-}
 
 }  // namespace
 
@@ -114,7 +104,7 @@ class InputOperatorMixedTest : public ::testing::TestWithParam<InputOperatorMixe
                                    .AddArg("device", "mixed")
                                    .AddArg("name", operator_name_)
                                    .AddArg("cpu_input", cpu_input_)
-                                   .AddOutput(operator_name_, "gpu"),
+                                   .AddOutput(operator_name_, StorageDevice::GPU),
                            operator_name_);
     std::vector<std::pair<std::string, std::string>> outputs = {
             {operator_name_, "gpu"},
@@ -130,28 +120,39 @@ TEST_P(InputOperatorMixedTest, InputOperatorMixedTest) {
                       num_threads_, device_id_, exec_pipelined_, exec_async_, exec_separated_,
                       cpu_queue_depth_, cpu_queue_depth_, gpu_queue_depth_, 0);
   for (int iteration = 0; iteration < n_iterations_; iteration++) {
-    auto prefetch_depth = std::min(cpu_queue_depth_, gpu_queue_depth_);
+    int prefetch_depth = daliInputFeedCount(&h, operator_name_.c_str());
     size_t sample_size = 42;
-    thrust::host_vector<int32_t> in_data(sample_size * batch_size_, 2137);
-    thrust::device_vector<int32_t> ref_data = in_data;
+    kernels::TestTensorList<int32_t> in_data;
+    in_data.reshape(uniform_list_shape(batch_size_, {sample_size}));
+    ConstantFill(in_data.cpu(), 0xDEADBEEF);
+    kernels::TestTensorList<int32_t> ref_data;
+    ref_data.reshape(uniform_list_shape(batch_size_, {sample_size}));
+    memcpy(ref_data.cpu().tensor_data(0), in_data.cpu().tensor_data(0),
+           batch_size_ * sample_size * sizeof(in_data.cpu().tensor_data(0)[0]));
 
     // Feed CPU input data.
     for (int i = 0; i < prefetch_depth; i++) {
       std::vector<int64_t> shapes(batch_size_, sample_size);
-      daliSetExternalInput(&h, operator_name_.c_str(), device_type_t::CPU, in_data.data(),
+      daliSetExternalInput(&h, operator_name_.c_str(), device_type_t::CPU,
+                           in_data.cpu().tensor_data(0),
                            dali_data_type_t::DALI_INT32, shapes.data(), 1, nullptr,
                            DALI_ext_force_copy);
     }
 
-    daliPrefetchUniform(&h, prefetch_depth);
-    for (int i = 0; i < prefetch_depth; i++) {
+    daliPrefetch(&h);
+    int num_output_batches = std::min(cpu_queue_depth_, gpu_queue_depth_);
+    for (int i = 0; i < num_output_batches; i++) {
       daliShareOutput(&h);
       auto sz = daliNumElements(&h, 0);
-      thrust::device_vector<int32_t> out_data(sz);
-      daliOutputCopy(&h, thrust::raw_pointer_cast(out_data.data()), 0, device_type_t::GPU, 0,
+      kernels::TestTensorList<int32_t> out_data;
+      out_data.reshape(uniform_list_shape(batch_size_, {sample_size}));
+      EXPECT_EQ(sz, out_data.gpu().shape.num_elements());
+      daliOutputCopy(&h, out_data.gpu().tensor_data(0), 0, device_type_t::GPU, 0,
                      DALI_ext_force_sync);
-
-      EXPECT_EQ(out_data, ref_data);
+      auto tv_out_data = out_data.cpu();
+      auto tv_ref_data = ref_data.cpu();
+      CUDA_CALL(cudaDeviceSynchronize());
+      Check(tv_out_data, tv_ref_data);
 
       daliOutputRelease(&h);
     }

@@ -1,4 +1,4 @@
-# Copyright (c) 2019-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2019-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -23,7 +23,7 @@ import random
 from nvidia.dali import pipeline_def
 
 from nose2.tools import params
-from nose_utils import assert_raises
+from nose_utils import assert_raises, SkipTest
 from test_utils import check_output_pattern
 from test_utils import compare_pipelines
 from test_utils import get_dali_extra_path
@@ -67,8 +67,8 @@ def decoder_pipe(
 test_data_root = get_dali_extra_path()
 good_path = "db/single"
 misnamed_path = "db/single/missnamed"
-test_good_path = {"jpeg", "mixed", "png", "tiff", "pnm", "bmp", "jpeg2k", "webp"}
-test_misnamed_path = {"jpeg", "png", "tiff", "pnm", "bmp"}
+test_good_path = ["jpeg", "mixed", "png", "tiff", "pnm", "bmp", "jpeg2k", "webp"]
+test_misnamed_path = ["jpeg", "png", "tiff", "pnm", "bmp"]
 
 
 def run_decode(_img_type, data_path, batch, device, threads, memory_stats=False):
@@ -81,7 +81,6 @@ def run_decode(_img_type, data_path, batch, device, threads, memory_stats=False)
         memory_stats=memory_stats,
         prefetch_queue_depth=1,
     )
-    pipe.build()
     iters = math.ceil(pipe.epoch_size("Reader") / batch)
     for _ in range(iters):
         outs = pipe.run()
@@ -90,14 +89,14 @@ def run_decode(_img_type, data_path, batch, device, threads, memory_stats=False)
 
 
 def test_image_decoder():
-    for device in {"cpu", "mixed"}:
-        for batch_size in {1, 10}:
+    for device in ["cpu", "mixed"]:
+        for batch_size in [1, 10]:
             for img_type in test_good_path:
-                for threads in {1, random.choice([2, 3, 4])}:
+                for threads in [1, random.choice([2, 3, 4])]:
                     data_path = os.path.join(test_data_root, good_path, img_type)
                     yield run_decode, img_type, data_path, batch_size, device, threads
             for img_type in test_misnamed_path:
-                for threads in {1, random.choice([2, 3, 4])}:
+                for threads in [1, random.choice([2, 3, 4])]:
                     data_path = os.path.join(test_data_root, misnamed_path, img_type)
                     yield run_decode, img_type, data_path, batch_size, device, threads
 
@@ -172,7 +171,6 @@ def run_decode_fused(test_fun, path, img_type, batch, device, threads, validatio
         device=device,
         prefetch_queue_depth=1,
     )
-    pipe.build()
     iters = math.ceil(pipe.epoch_size("Reader") / batch)
     for _ in range(iters):
         out_1, out_2 = pipe.run()
@@ -209,7 +207,7 @@ def test_image_decoder_fused():
                 return np.allclose(x, y)
 
             validation_fun = mean_close
-        for device in {"cpu", "mixed"}:
+        for device in ["cpu", "mixed"]:
             for img_type in test_good_path:
                 yield (
                     run_decode_fused,
@@ -250,8 +248,8 @@ def check_FastDCT_body(batch_size, img_type, device):
 
 
 def test_FastDCT():
-    for device in {"cpu", "mixed"}:
-        for batch_size in {1, 8}:
+    for device in ["cpu", "mixed"]:
+        for batch_size in [1, 8]:
             for img_type in test_good_path:
                 yield check_FastDCT_body, batch_size, img_type, device
 
@@ -279,9 +277,8 @@ def check_fancy_upsampling_body(batch_size, img_type, device):
 @params(1, 8)
 def test_fancy_upsampling(batch_size):
     if nvidia.dali.backend.GetNvjpegVersion() < 12001:
-        from nose import SkipTest
-
         raise SkipTest("nvJPEG doesn't support fancy upsampling in this version")
+
     data_path = os.path.join(test_data_root, good_path, "jpeg")
     compare_pipelines(
         decoder_pipe(
@@ -316,8 +313,8 @@ def test_image_decoder_memory_stats():
         with check_output_pattern(pattern):
             run_decode(img_type, data_path, size, device, threads, memory_stats=True)
 
-    for size in {1, 10}:
-        for threads in {1, random.choice([2, 3, 4])}:
+    for size in [1, 10]:
+        for threads in [1, random.choice([2, 3, 4])]:
             yield check, img_type, size, device, threads
 
 
@@ -372,7 +369,6 @@ def _testimpl_image_decoder_tiff_with_alpha_16bit(device, out_type, path, ext):
 
     files = get_img_files(os.path.join(test_data_root, path), ext=ext, subdir=None)
     pipe = pipe(device, out_type=out_type, files=files)
-    pipe.build()
     out, shape = pipe.run()
     if device == "mixed":
         out = out.as_cpu()
@@ -452,7 +448,6 @@ def _testimpl_image_decoder_crop_error_oob(device):
         return decoded
 
     p = pipe(device)
-    p.build()
     assert_raises(
         RuntimeError, p.run, glob="cropping window*..*..*is not valid for image dimensions*[*x*]"
     )
@@ -473,7 +468,6 @@ def _testimpl_image_decoder_slice_error_oob(device):
         return decoded
 
     p = pipe(device)
-    p.build()
     assert_raises(
         RuntimeError, p.run, glob="cropping window*..*..*is not valid for image dimensions*[*x*]"
     )
@@ -496,7 +490,6 @@ def test_pinned_input_hw_decoder():
         return decoded, encoded_gpu
 
     p = pipe()
-    p.build()
     p.run()
 
 
@@ -512,7 +505,6 @@ def test_tiff_palette():
         return decoded, peeked_shapes
 
     p = pipe()
-    p.build()
     imgs, peeked_shapes = p.run()
     assert (
         peeked_shapes.at(0) == peeked_shapes.at(1)

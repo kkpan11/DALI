@@ -1,4 +1,4 @@
-// Copyright (c) 2018-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2018-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,9 +16,10 @@
 #include <algorithm>
 #include <map>
 #include "dali/core/common.h"
-#include "dali/image/image.h"
+#include "dali/operators/decoder/image/image.h"
 #include "dali/operators/reader/loader/sequence_loader.h"
 #include "dali/operators/reader/loader/utils.h"
+#include "dali/util/uri.h"
 
 namespace dali {
 
@@ -137,10 +138,14 @@ void SequenceLoader::LoadFrame(const std::vector<std::string> &s, Index frame_id
     return;
   }
 
-  auto frame = FileStream::Open(frame_filename, read_ahead_, !copy_read_data_);
+  FileStream::Options opts;
+  opts.read_ahead = read_ahead_;
+  opts.use_mmap = !copy_read_data_;
+  opts.use_odirect = false;
+  auto frame = FileStream::Open(frame_filename, opts);
   Index frame_size = frame->Size();
   // Release and unmap memory previously obtained by Get call
-  if (copy_read_data_) {
+  if (copy_read_data_ || !frame->CanMemoryMap()) {
     if (target->shares_data()) {
       target->Reset();
     }

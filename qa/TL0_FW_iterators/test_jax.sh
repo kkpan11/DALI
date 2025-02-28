@@ -10,11 +10,23 @@ do_once() {
 }
 
 test_body() {
-    # General tests for iterators
-    ${python_invoke_test} -m '(?:^|[\b_\./-])[Tt]est.*jax*' test_fw_iterators.py
+    # Updating JAX 0.4.13 -> 0.4.16 (or the most recent 0.4.26) causes
+    # asan to fail with suposed stack-overflow
+    # TODO(ktokarski) Investigate what may be the underlying cause
+    if [ -z "$DALI_ENABLE_SANITIZERS" ]; then
+        # General tests for iterators
+        ${python_new_invoke_test} -A 'jax' test_fw_iterators
+    fi
 
     # More specific JAX tests
     ${python_new_invoke_test} -s jax_plugin/ test_integration test_iterator test_peekable_iterator
+
+    # Updating JAX 0.4.13 -> 0.4.16 (or the most recent 0.4.26) causes
+    # asan to fail with suposed stack-overflow
+    # TODO(ktokarski) Investigate what may be the underlying cause
+    if [ -z "$DALI_ENABLE_SANITIZERS" ]; then
+        ${python_new_invoke_test} checkpointing.test_dali_checkpointing_fw_iterators.TestJax
+    fi
 }
 
 pushd ../..

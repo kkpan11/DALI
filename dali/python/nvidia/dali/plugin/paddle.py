@@ -1,5 +1,5 @@
 # Copyright (c) 2019 PaddlePaddle Authors. All Rights Reserved.
-# Copyright (c) 2017-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2017-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,17 +18,18 @@ import math
 
 import numpy as np
 import paddle
-from distutils.version import LooseVersion
+from packaging.version import Version
+import paddle.utils
 
 from nvidia.dali import types
 from nvidia.dali.backend import TensorListCPU, TensorGPU, TensorListGPU
 from nvidia.dali.plugin.base_iterator import _DaliBaseIterator
 from nvidia.dali.plugin.base_iterator import LastBatchPolicy
 
-
-assert LooseVersion(paddle.__version__) == LooseVersion("0.0.0") or LooseVersion(
-    paddle.__version__
-) >= LooseVersion("2.0.0"), "DALI PaddlePaddle support requires Paddle develop or release >= 2.0.0"
+if isinstance(paddle.__version__, str):
+    assert Version(paddle.__version__) == Version("0.0.0") or Version(
+        paddle.__version__
+    ) >= Version("2.0.0"), "DALI PaddlePaddle support requires Paddle develop or release >= 2.0.0"
 
 
 dtype_map = {
@@ -62,21 +63,21 @@ def feed_ndarray(dali_tensor, ptr, cuda_stream=None):
 
     Parameters
     ----------
-    `dali_tensor` : dali.backend.TensorCPU or dali.backend.TensorGPU
+    dali_tensor : dali.backend.TensorCPU or dali.backend.TensorGPU
                     Tensor from which to copy
-    `ptr` : LoDTensor data pointer
+    ptr : LoDTensor data pointer
             Destination of the copy
-    `cuda_stream` : cudaStream_t handle or any value that can be cast to cudaStream_t
+    cuda_stream : cudaStream_t handle or any value that can be cast to cudaStream_t
                     CUDA stream to be used for the copy
                     (if not provided, an internal user stream will be selected)
     """
 
-    cuda_stream = types._raw_cuda_stream(cuda_stream)
+    non_blocking = cuda_stream is not None
+    cuda_stream = types._raw_cuda_stream_ptr(cuda_stream)
 
     c_type_pointer = ctypes.c_void_p(ptr)
     if isinstance(dali_tensor, (TensorGPU, TensorListGPU)):
-        stream = None if cuda_stream is None else ctypes.c_void_p(cuda_stream)
-        dali_tensor.copy_to_external(c_type_pointer, stream, non_blocking=True)
+        dali_tensor.copy_to_external(c_type_pointer, cuda_stream, non_blocking=non_blocking)
     else:
         dali_tensor.copy_to_external(c_type_pointer)
     return ptr
@@ -172,7 +173,7 @@ class DALIGenericIterator(_DaliBaseIterator):
     dynamic_shape : any, optional,
                 Parameter used only for backward compatibility.
     fill_last_batch : bool, optional, default = None
-                **Deprecated** Please use ``last_batch_policy`` instead
+                **Deprecated** Please use `last_batch_policy` instead
 
                 Whether to fill the last batch with data up to 'self.batch_size'.
                 The iterator would return the first integer multiple
@@ -184,7 +185,7 @@ class DALIGenericIterator(_DaliBaseIterator):
                 to fully fill it. See :meth:`nvidia.dali.plugin.base_iterator.LastBatchPolicy`
     last_batch_padded : bool, optional, default = False
                 Whether the last batch provided by DALI is padded with the last sample
-                or it just wraps up. In the conjunction with ``last_batch_policy`` it tells
+                or it just wraps up. In the conjunction with `last_batch_policy` it tells
                 if the iterator returning last batch with data only partially filled with
                 data from the current epoch is dropping padding samples or samples from
                 the next epoch. If set to ``False`` next
@@ -257,8 +258,6 @@ class DALIGenericIterator(_DaliBaseIterator):
             prepare_first_batch=prepare_first_batch,
         )
 
-        self._counter = 0
-
         self._first_batch = None
         if self._prepare_first_batch:
             try:
@@ -267,11 +266,7 @@ class DALIGenericIterator(_DaliBaseIterator):
                 # here we should set if to False again
                 self._ever_consumed = False
             except StopIteration:
-                assert False, (
-                    "It seems that there is no data in the pipeline. This may happen "
-                    "if `last_batch_policy` is set to PARTIAL and the requested batch size is "
-                    "greater than the shard size."
-                )
+                self._report_no_data_in_pipeline()
 
     def __next__(self):
         self._ever_consumed = True
@@ -287,6 +282,7 @@ class DALIGenericIterator(_DaliBaseIterator):
 
         for i in range(self._num_gpus):
             dev_id = self._pipes[i].device_id
+            copy = not self._pipes[i].exec_dynamic
             # Initialize dict for all output categories
             category_outputs = dict()
             # Segregate outputs into categories
@@ -327,19 +323,27 @@ class DALIGenericIterator(_DaliBaseIterator):
                     category_place[cat] = pd_cpu_place
 
             pd_tensors = {}
-            for cat, tensor in category_tensors.items():
-                lod_tensor = paddle.framework.core.LoDTensor()
-                pd_tensors[cat] = lod_tensor
-                lod_tensor._set_dims(category_shapes[cat])
-                seq_len = category_lengths[cat]
-                lod_tensor.set_recursive_sequence_lengths(seq_len)
-                lod_tensor._mutable_data(category_place[cat], category_pd_type[cat])
             data_batches[i] = pd_tensors
-
             stream = paddle.device.cuda.current_stream(dev_id).cuda_stream
-            for cat, tensor in category_tensors.items():
-                ptr = pd_tensors[cat]._mutable_data(category_place[cat], category_pd_type[cat])
-                feed_ndarray(tensor, ptr, stream)
+            if copy:
+                for cat, tensor in category_tensors.items():
+                    lod_tensor = paddle.framework.core.LoDTensor()
+                    pd_tensors[cat] = lod_tensor
+                    lod_tensor._set_dims(category_shapes[cat])
+                    seq_len = category_lengths[cat]
+                    lod_tensor.set_recursive_sequence_lengths(seq_len)
+                    lod_tensor._mutable_data(category_place[cat], category_pd_type[cat])
+
+                for cat, tensor in category_tensors.items():
+                    ptr = pd_tensors[cat]._mutable_data(category_place[cat], category_pd_type[cat])
+                    feed_ndarray(tensor, ptr, stream)
+            else:
+                for cat, tensor in category_tensors.items():
+                    capsule = tensor.__dlpack__(stream=stream)
+                    pd_tensor = paddle.framework.core.from_dlpack(capsule)
+                    seq_len = category_lengths[cat]
+                    pd_tensor.set_recursive_sequence_lengths(seq_len)
+                    pd_tensors[cat] = pd_tensor
 
         self._schedule_runs()
 
@@ -435,7 +439,7 @@ class DALIClassificationIterator(DALIGenericIterator):
     dynamic_shape : any, optional,
                 Parameter used only for backward compatibility.
     fill_last_batch : bool, optional, default = None
-                **Deprecated** Please use ``last_batch_policy`` instead
+                **Deprecated** Please use `last_batch_policy` instead
 
                 Whether to fill the last batch with data up to 'self.batch_size'.
                 The iterator would return the first integer multiple
@@ -447,7 +451,7 @@ class DALIClassificationIterator(DALIGenericIterator):
                 to fully fill it. See :meth:`nvidia.dali.plugin.base_iterator.LastBatchPolicy`
     last_batch_padded : bool, optional, default = False
                 Whether the last batch provided by DALI is padded with the last sample
-                or it just wraps up. In the conjunction with ``last_batch_policy`` it tells
+                or it just wraps up. In the conjunction with `last_batch_policy` it tells
                 if the iterator returning last batch with data only partially filled with
                 data from the current epoch is dropping padding samples or samples from
                 the next epoch. If set to ``False`` next

@@ -1,4 +1,4 @@
-# Copyright (c) 2020-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2020-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,8 +14,14 @@
 
 import nvidia.dali.plugin.pytorch
 import nvidia.dali.plugin.numba
+import nvidia.dali.plugin.jax
 import inspect
 import sys
+
+try:
+    import nvidia.dali.plugin.video
+except ImportError:
+    pass  # nvidia-dali-plugin not present
 
 import operations_table
 
@@ -32,19 +38,41 @@ exclude_ops_members = {"nvidia.dali.ops": ["PythonFunctionBase"]}
 fn_modules = {
     "nvidia.dali.fn": nvidia.dali.fn,
     "nvidia.dali.plugin.pytorch.fn": nvidia.dali.plugin.pytorch.fn,
+    "nvidia.dali.plugin.jax.fn": nvidia.dali.plugin.jax.fn,
     "nvidia.dali.plugin.numba.fn.experimental": nvidia.dali.plugin.numba.fn.experimental,
 }
 
-
 exclude_fn_members = {}
 
+installation_page_url = (
+    "https://docs.nvidia.com/deeplearning/dali/user-guide/"
+    "docs/installation.html"
+)
 
 mod_aditional_doc = {
     "nvidia.dali.fn.transforms": (
         "All operators in this module support only CPU device as they are meant to be provided"
         " as an input to named keyword operator arguments. Check for more details the relevant"
         " :ref:`pipeline documentation section<Processing Graph Structure>`."
-    )
+    ),
+    "nvidia.dali.fn.plugin.video": (
+        ".. note::\n\n    "
+        "This module belongs to the `nvidia-dali-video` plugin, that needs to be installed "
+        "as a separate package. Refer to the `Installation Guide "
+        f"<{installation_page_url}#nvidia-dali-video>`__"
+        " for more details."
+    ),
+    "nvidia.dali.fn.readers": (
+        "Operators in this module are data-producing operators that read data from storage or a"
+        " different source, and where the data locations are known at pipeline construction time"
+        " via arguments. For data readers that are able to read from sources specified dynamically"
+        " via regular inputs, see `nvidia.dali.fn.io` module."
+    ),
+    "nvidia.dali.fn.io": (
+        "Operators in this module are data-reading operators that read data from a source  "
+        " specified at runtime by operator inputs. For inputless data readers that are able "
+        " to build the dataset at pipeline constructions, see `nvidia.dali.fn.readers` module."
+    ),
 }
 
 
@@ -71,17 +99,28 @@ def get_functions(module):
     or hidden members. No nested modules would be reported."""
     result = []
     # Take all public members of given module
-    public_members = list(filter(lambda x: not str(x).startswith("_"), dir(module)))
+    public_members = list(
+        filter(lambda x: not str(x).startswith("_"), dir(module))
+    )
     for member_name in public_members:
         member = getattr(module, member_name)
         # Just user-defined functions
-        if inspect.isfunction(member) and not member.__module__.endswith("hidden"):
+        if inspect.isfunction(member) and not member.__module__.endswith(
+            "hidden"
+        ):
             result.append(member_name)
     return result
 
 
 def get_schema_names(module, functions):
-    return [getattr(sys.modules[module], fun)._schema_name for fun in functions]
+    def get_schema_name_or_dummy_schema(fun):
+        obj = getattr(sys.modules[module], fun)
+        if hasattr(obj, "_schema_name"):
+            return obj._schema_name
+        else:
+            return operations_table.no_schema_fns[f"{module}.{fun}"]
+
+    return [get_schema_name_or_dummy_schema(fun) for fun in functions]
 
 
 def op_autodoc(out_filename):
@@ -134,7 +173,9 @@ def single_module_file(module, funs_in_module, references):
     result += "\n"
 
     result += f"The following table lists all operations available in ``{module}`` module:\n"
-    result += operations_table.operations_table_str(get_schema_names(module, funs_in_module))
+    result += operations_table.operations_table_str(
+        get_schema_names(module, funs_in_module)
+    )
     result += "\n\n"
 
     result += ".. toctree::\n   :hidden:\n\n"
@@ -162,15 +203,22 @@ def fn_autodoc(out_filename, generated_path, references):
         # the rest is within the same directory, so there is no need for that
         all_modules_str += f"   {generated_path / module}\n"
 
-        single_module_str = single_module_file(module, funs_in_module, references)
+        single_module_str = single_module_file(
+            module, funs_in_module, references
+        )
         with open(generated_path / (module + ".rst"), "w") as module_file:
             module_file.write(single_module_str)
 
         for fun in funs_in_module:
             full_name = f"{module}.{fun}"
-            if module in exclude_fn_members and fun in exclude_fn_members[module]:
+            if (
+                module in exclude_fn_members
+                and fun in exclude_fn_members[module]
+            ):
                 continue
-            with open(generated_path / (full_name + ".rst"), "w") as function_file:
+            with open(
+                generated_path / (full_name + ".rst"), "w"
+            ) as function_file:
                 single_file_str = single_fun_file(full_name, references)
                 function_file.write(single_file_str)
 

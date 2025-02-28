@@ -1,4 +1,4 @@
-// Copyright (c) 2017-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2017-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,24 +18,25 @@
 #include <google/protobuf/io/coded_stream.h>
 
 #include <algorithm>
+#include <exception>
+#include <fstream>
 #include <functional>
 #include <memory>
 
-#include "dali/pipeline/executor/async_pipelined_executor.h"
-#include "dali/pipeline/executor/async_separated_pipelined_executor.h"
-#include "dali/pipeline/executor/executor_factory.h"
-#include "dali/pipeline/executor/pipelined_executor.h"
-
-#include "dali/pipeline/operator/argument.h"
-#include "dali/pipeline/operator/common.h"
 #include "dali/core/device_guard.h"
 #include "dali/core/mm/default_resources.h"
 #include "dali/pipeline/dali.pb.h"
+#include "dali/pipeline/executor/executor_factory.h"
+#include "dali/pipeline/operator/argument.h"
+#include "dali/pipeline/operator/common.h"
+#include "dali/pipeline/operator/error_reporting.h"
+#include "dali/pipeline/operator/name_utils.h"
+#include "dali/pipeline/graph/graph2dot.h"
+#include "dali/pipeline/graph/cse.h"
 
 namespace dali {
 
 namespace {
-
 
 bool DeserializePipeline(const std::string &serialized_pipeline,
                          dali_proto::PipelineDef &deserialized_pipeline) {
@@ -61,7 +62,7 @@ void DeserializeOpSpec(const dali_proto::OpDef &def, OpSpec *spec) {
     name = "ExternalSource";
   }
 
-  spec->set_name(name);
+  spec->SetSchema(name);
 
   // Extract all the arguments with correct types
   for (auto &arg : def.args()) {
@@ -73,7 +74,7 @@ void DeserializeOpSpec(const dali_proto::OpDef &def, OpSpec *spec) {
 
   for (int i = 0; i < def.input_size(); ++i) {
     if (!def.input(i).is_argument_input()) {
-      spec->AddInput(def.input(i).name(), def.input(i).device());
+      spec->AddInput(def.input(i).name(), ParseStorageDevice(def.input(i).device()));
     }
   }
 
@@ -84,7 +85,7 @@ void DeserializeOpSpec(const dali_proto::OpDef &def, OpSpec *spec) {
   }
 
   for (int i = 0; i < def.output_size(); ++i) {
-    spec->AddOutput(def.output(i).name(), def.output(i).device());
+    spec->AddOutput(def.output(i).name(), ParseStorageDevice(def.output(i).device()));
   }
 }
 
@@ -92,24 +93,46 @@ void InitializeMemoryResources() {
   (void)mm::GetDefaultResource<mm::memory_kind::host>();
 }
 
+bool IsGraphOptimizationEnabled() {
+  static const bool enabled = []() {
+    if (const char *env = getenv("DALI_OPTIMIZE_GRAPH"))
+      return atoi(env) != 0;
+    else  // enabled by default
+      return true;
+  }();
+  return enabled;
+}
+
+bool IsCSEEnabled() {
+  static const bool enabled = []() {
+    if (!IsGraphOptimizationEnabled())
+      return false;
+    if (const char *env = getenv("DALI_ENABLE_CSE"))
+      return atoi(env) != 0;
+    else  // enabled by default
+      return true;
+  }();
+  return enabled;
+}
+
 }  // namespace
 
 Pipeline::Pipeline(int max_batch_size, int num_threads, int device_id, int64_t seed,
                    bool pipelined_execution, int prefetch_queue_depth,
-                   bool async_execution, size_t bytes_per_sample_hint,
-                   bool set_affinity, int max_num_stream, int default_cuda_stream_priority)
-    : built_(false), separated_execution_{false} {
+                   bool async_execution, bool dynamic_execution, size_t bytes_per_sample_hint,
+                   bool set_affinity) {
   InitializeMemoryResources();
   Init(max_batch_size, num_threads, device_id, seed, pipelined_execution, separated_execution_,
-       async_execution, bytes_per_sample_hint, set_affinity, max_num_stream,
-       default_cuda_stream_priority, QueueSizes{prefetch_queue_depth});
+       async_execution, dynamic_execution, bytes_per_sample_hint, set_affinity,
+       QueueSizes{prefetch_queue_depth});
 }
 
-Pipeline::Pipeline(const string &serialized_pipe, int batch_size, int num_threads, int device_id,
-                   bool pipelined_execution, int prefetch_queue_depth, bool async_execution,
-                   size_t bytes_per_sample_hint, bool set_affinity, int max_num_stream,
-                   int default_cuda_stream_priority, int64_t seed)
-    : built_(false), separated_execution_(false) {
+Pipeline::Pipeline(const string &serialized_pipe,
+                   int batch_size, int num_threads, int device_id,
+                   bool pipelined_execution, int prefetch_queue_depth,
+                   bool async_execution, bool dynamic_execution,
+                   size_t bytes_per_sample_hint, bool set_affinity,
+                   int64_t seed) {
   InitializeMemoryResources();
   dali_proto::PipelineDef def;
   DALI_ENFORCE(DeserializePipeline(serialized_pipe, def), "Error parsing serialized pipeline.");
@@ -138,10 +161,9 @@ Pipeline::Pipeline(const string &serialized_pipe, int batch_size, int num_thread
          pipelined_execution,
          separated_execution_,
          async_execution,
+         dynamic_execution,
          bytes_per_sample_hint,
          set_affinity,
-         max_num_stream,
-         default_cuda_stream_priority,
          QueueSizes{prefetch_queue_depth});
 
     // from serialized pipeline, construct new pipeline
@@ -162,6 +184,11 @@ Pipeline::Pipeline(const string &serialized_pipe, int batch_size, int num_thread
       this->output_descs_.emplace_back(output.name(), output.device(),
                                        static_cast<DALIDataType>(output.dtype()), output.ndim());
     }
+
+    // checkpointing
+    if (def.enable_checkpointing()) {
+      this->EnableCheckpointing();
+    }
 }
 
 Pipeline::~Pipeline() {
@@ -172,10 +199,15 @@ Pipeline::~Pipeline() {
 }
 
 void Pipeline::Init(int max_batch_size, int num_threads, int device_id, int64_t seed,
-                    bool pipelined_execution, bool separated_execution, bool async_execution,
-                    size_t bytes_per_sample_hint, bool set_affinity, int max_num_stream,
-                    int default_cuda_stream_priority, QueueSizes prefetch_queue_depth) {
-    // guard cudaDeviceGetStreamPriorityRange call
+                    bool pipelined_execution, bool separated_execution,
+                    bool async_execution, bool dynamic_execution,
+                    size_t bytes_per_sample_hint, bool set_affinity,
+                    QueueSizes prefetch_queue_depth) {
+    DALI_ENFORCE(device_id == CPU_ONLY_DEVICE_ID || cuInitChecked(),
+                "You are trying to create a GPU DALI pipeline, while CUDA is not available. "
+                "Please install CUDA or set `device_id = None` in Pipeline constructor. "
+                "If running inside Docker container, you may need to use  `--gpus` option.");
+
     DeviceGuard g(device_id);
     this->max_batch_size_ = max_batch_size;
     this->num_threads_ = num_threads;
@@ -183,33 +215,13 @@ void Pipeline::Init(int max_batch_size, int num_threads, int device_id, int64_t 
     using Clock = std::chrono::high_resolution_clock;
     this->original_seed_ = seed < 0 ? Clock::now().time_since_epoch().count() : seed;
     this->pipelined_execution_ = pipelined_execution;
-    this->separated_execution_ = separated_execution;
     this->async_execution_ = async_execution;
+    this->dynamic_execution_ = dynamic_execution;
     this->bytes_per_sample_hint_ = bytes_per_sample_hint;
     this->set_affinity_ = set_affinity;
-    this->max_num_stream_ = max_num_stream;
-    this->default_cuda_stream_priority_ = default_cuda_stream_priority;
     this->prefetch_queue_depth_ = prefetch_queue_depth;
+    this->separated_execution_ = (prefetch_queue_depth.cpu_size != prefetch_queue_depth.gpu_size);
     DALI_ENFORCE(max_batch_size_ > 0, "Max batch size must be greater than 0");
-
-    int lowest_cuda_stream_priority = 0, highest_cuda_stream_priority = 0;
-    // do it only for the GPU pipeline
-    if (device_id != CPU_ONLY_DEVICE_ID) {
-      CUDA_CALL(cudaDeviceGetStreamPriorityRange(&lowest_cuda_stream_priority,
-                                                 &highest_cuda_stream_priority));
-    }
-    const auto min_priority_value =
-        std::min(lowest_cuda_stream_priority, highest_cuda_stream_priority);
-    const auto max_priority_value =
-        std::max(lowest_cuda_stream_priority, highest_cuda_stream_priority);
-    DALI_ENFORCE(
-        default_cuda_stream_priority >= min_priority_value &&
-        default_cuda_stream_priority <= max_priority_value,
-        "Provided default cuda stream priority `" + std::to_string(default_cuda_stream_priority) +
-        "` is outside the priority range [" + std::to_string(min_priority_value) + ", " +
-        std::to_string(max_priority_value) + "], with lowest priority being `" +
-        std::to_string(lowest_cuda_stream_priority) + "` and highest priority being `" +
-        std::to_string(highest_cuda_stream_priority) + "`");
 
     seed_.resize(MAX_SEEDS);
     current_seed_ = 0;
@@ -223,24 +235,59 @@ static bool has_prefix(const std::string &operator_name, const std::string& pref
                     prefix.begin());
 }
 
-int Pipeline::AddOperator(const OpSpec &spec, const std::string& inst_name) {
+int Pipeline::AddOperator(const OpSpec &spec, std::string_view inst_name) {
   return AddOperator(spec, inst_name, GetNextLogicalId());
 }
 
 int Pipeline::AddOperator(const OpSpec &spec, int logical_id) {
-  return AddOperator(spec, make_string("__", spec.name(), "_", logical_id), logical_id);
+  std::string name = make_string("__", spec.SchemaName(), "_", logical_id);
+  if (instance_names_.count(name)) {
+    int group_size = 0;
+    auto it = logical_ids_.find(logical_id);
+    if (it != logical_ids_.end())
+      group_size = it->second.size();
+    for (int aux_id = group_size; instance_names_.count(name) > 0; aux_id++)
+      name = make_string("__", spec.SchemaName(), "_", logical_id, "_", aux_id);
+  }
+  return AddOperator(spec, name, logical_id);
 }
 
 int Pipeline::AddOperator(const OpSpec &spec) {
   return AddOperator(spec, GetNextLogicalId());
 }
 
+int Pipeline::AddOperator(const OpSpec &const_spec, std::string_view inst_name, int logical_id) {
+  DALI_ENFORCE(!built_,
+               "Alterations to the pipeline after \"Build()\" has been called are not allowed");
 
-int Pipeline::AddOperator(const OpSpec &const_spec, const std::string& inst_name, int logical_id) {
-  DALI_ENFORCE(!built_, "Alterations to the pipeline after "
-      "\"Build()\" has been called are not allowed");
+  // Validate op device
+  auto device = const_spec.GetArgument<std::string>("device");
+  // Doesn't make sense to state the wrong device in the error message, so we use the operator name
+  // directly instead of the error context message..
+  DALI_ENFORCE(device == "cpu" || device == "gpu" || device == "mixed" || device == "support",
+               make_string("Invalid device argument \"", device, "\" for operator `",
+                           GetOpDisplayName(const_spec, true),
+                           "`. Valid options are \"cpu\", \"gpu\" or \"mixed\""));
+
+  int result = -1;
+  try {
+    result = AddOperatorImpl(const_spec, inst_name, logical_id);
+  } catch (...) {
+    PropagateError({std::current_exception(), GetErrorContextMessage(const_spec), ""});
+  }
+  return result;
+}
+
+int Pipeline::AddOperatorImpl(const OpSpec &const_spec,
+                              std::string_view inst_name,
+                              int logical_id) {
+  assert(!built_ && "Already checked by AddOperator()");
+
   DALI_ENFORCE(0 <= logical_id,
                "Logical id of the node must be positive, got " + std::to_string(logical_id) + ".");
+
+  DALI_ENFORCE(instance_names_.insert(std::string(inst_name)).second,
+               make_string("Duplicate operator instance name: \"", inst_name, "\"."));
 
   if (logical_id > next_logical_id_) {
     next_logical_id_ = logical_id + 1;
@@ -248,22 +295,26 @@ int Pipeline::AddOperator(const OpSpec &const_spec, const std::string& inst_name
 
   // we modify spec so copy it
   OpSpec spec = const_spec;
-  auto operator_name = spec.name();
-  // Take a copy of the passed OpSpec for serialization purposes before any modification
-  this->op_specs_for_serialization_.push_back({inst_name, spec, logical_id});
+  auto operator_name = GetOpDisplayName(spec, true);
 
-  // Validate op device
-  string device = spec.GetArgument<string>("device");
-  DALI_ENFORCE(device == "cpu" || device == "gpu" || device == "mixed" || device == "support",
-    "Invalid device argument \"" +  device +
-    "\". Valid options are \"cpu\", \"gpu\" or \"mixed\"");
+  auto device = const_spec.GetArgument<std::string>("device");
+  if (spec.GetSchema().IsNoPrune())
+    spec.SetArg("preserve", true);
+
+  if (spec.SchemaName() == "ExternalSource")
+    spec.SetArg("preserve_name", true);  // ExternalSource must not be collapsed in CSE
+
+  // Take a copy of the passed OpSpec for serialization purposes before any modification
+  this->op_specs_for_serialization_.push_back({std::string(inst_name), spec, logical_id});
 
   DALI_ENFORCE(device != "gpu" || device_id_ != CPU_ONLY_DEVICE_ID,
-               make_string("Cannot add a GPU operator ", operator_name, ", device_id should not be"
-               " equal CPU_ONLY_DEVICE_ID."));
+               "Cannot add a GPU operator. Pipeline 'device_id' should not be equal to "
+               "`CPU_ONLY_DEVICE_ID`.");
 
   if (device == "support") {
-    DALI_WARN("\"support\" device is deprecated; use \"cpu\" or leave blank instead");
+    auto warning_context = GetErrorContextMessage(spec, "Warning");
+    DALI_WARN(warning_context,
+              " \"support\" device is deprecated; use \"cpu\" or leave blank instead.");
     device = "cpu";
     spec.SetArg("device", "cpu");
   }
@@ -277,107 +328,71 @@ int Pipeline::AddOperator(const OpSpec &const_spec, const std::string& inst_name
       continue;
     }
     string input_name = spec.InputName(i);
-    string input_device = spec.InputDevice(i);
+    auto input_device = spec.InputDevice(i);
     auto it = edge_names_.find(input_name);
 
-    DALI_ENFORCE(it != edge_names_.end(), "Input '" + input_name +
-        "' to op '" + spec.name() + "' is not known to the pipeline.");
+    DALI_ENFORCE(it != edge_names_.end(),
+                 make_string("Data node \"", input_name, "\" requested as ", FormatInput(spec, i),
+                             " to operator \"", inst_name, "\" is not known to the pipeline."));
 
-    // Table of possible scenarios:
-    // Op location / requested input type / data location
-    // cpu / cpu / cpu -> everything is fine
-    // cpu / cpu / gpu -> error, data does not exist on cpu
-    // cpu / gpu / cpu -> error, cpu op not allowed to have gpu inputs
-    // cpu / gpu / gpu -> both of above errors
-    // gpu / cpu / cpu -> need to use contiguous version
-    // gpu / cpu / gpu -> error, data not in specified location
-    // gpu / gpu / cpu -> need to insert copy to device
-    // gpu / gpu / gpu -> everything is fine
-    // mixed / cpu / cpu -> everything is fine
-    // mixed / cpu / gpu -> error, data does not exist on cpu
-    // mixed / gpu / cpu -> error, mixed op not allowed to have gpu inputs
-    // mixed / gpu / gpu -> both of above errors
-    string error_str = "(op: '" + spec.name() + "', input: '" +
-      input_name + "')";
+    DALI_ENFORCE(device_id_ != CPU_ONLY_DEVICE_ID || device == "cpu",
+                  "Cannot add a Mixed operator with a GPU output, 'device_id' "
+                  "should not be `CPU_ONLY_DEVICE_ID`.");
 
-    if (device == "cpu" || device == "mixed") {
-      DALI_ENFORCE(input_device == "cpu", "cpu/mixed ops can only take cpu "
-          "inputs. CPU op cannot follow GPU op. " + error_str);
-      DALI_ENFORCE(it->second.has_cpu, "cpu input requested by op exists "
-          "only on gpu. CPU op cannot follow GPU op. " + error_str);
-      DALI_ENFORCE(device_id_ != CPU_ONLY_DEVICE_ID || device == "cpu",
-                   make_string("Cannot add a mixed operator ", operator_name,
-                   " with a GPU output, device_id should not be CPU_ONLY_DEVICE_ID."));
-    } else if (input_device == "cpu") {
-      // device == gpu
-      DALI_ENFORCE(it->second.has_cpu, "cpu input requested by op exists "
-          "only on gpu. CPU op cannot follow GPU op. " + error_str);
-      SetupCPUInput(it, i, &spec);
+    if (input_device == StorageDevice::GPU) {
+      ToGPU(it);
     } else {
-      SetupGPUInput(it);
+      ToCPU(it);
     }
   }
 
   // Verify the argument inputs to the op
-  for (const auto& arg_pair : spec.ArgumentInputs()) {
-    Index input_idx = arg_pair.second;
+  for (const auto &[arg_name, input_idx] : spec.ArgumentInputs()) {
     std::string input_name = spec.InputName(input_idx);
     auto it = edge_names_.find(input_name);
 
-    DALI_ENFORCE(it != edge_names_.end(), "Input '" + input_name +
-        "' to op '" + spec.name() + "' is not known to the pipeline.");
+    // TODO(michalz): This is a bit ugly, but it provides a nice and generic error message.
+    //                In the long run, we should probably allow GPU named inputs and then
+    //                the check should be done based on the schema, without a universal ToCPU.
+    if (dynamic_execution_)
+      ToCPU(it);
 
-    string error_str = "(op: '" + spec.name() + "', input: '" +
-      input_name + "')";
+    DALI_ENFORCE(
+        it != edge_names_.end(),
+        make_string("Data node \"", input_name, "\" requested as ", FormatArgument(spec, arg_name),
+                    " to operator \"", inst_name, "\" is not known to the pipeline."));
 
     if (!it->second.has_cpu) {
-      DALI_FAIL(make_string(
-          "Named arguments inputs to operators must be CPU data nodes. However, a GPU ",
-          "data node was provided (op: '", spec.name(), "', input: '", input_name, "')"));
+      assert(it->second.has_gpu);
+      DALI_FAIL(make_string("Error while specifying ", FormatArgument(spec, arg_name),
+                            ". Named argument inputs to operators must be CPU data nodes. "
+                            "However, a GPU data node was provided."));
     }
-
-    if (device == "gpu" && separated_execution_)
-      SetupCPUInput(it, input_idx, &spec);
   }
 
   // Verify and record the outputs of the op
   for (int i = 0; i < spec.NumOutput(); ++i) {
     string output_name = spec.OutputName(i);
-    string output_device = spec.OutputDevice(i);
-    string error_str = "(op: '" + spec.name() + "', output: '" +
-      output_name + "')";
+    auto output_device = spec.OutputDevice(i);
 
     auto it = edge_names_.find(output_name);
-    DALI_ENFORCE(it == edge_names_.end(), "Output name '" +
-        output_name + "' conflicts with existing intermediate "
-        "result name. " + error_str);
+    DALI_ENFORCE(
+        it == edge_names_.end(),
+        make_string("Error while specifying ", FormatOutput(spec, i), ". Output name \"",
+                    output_name, "\" conflicts with an existing intermediate result name."));
 
-    // Validate output data conforms to graph constraints
-    // Note: DALI CPU -> GPU flow is enforced, when the operators are added via the Python layer
-    // in `generate_outputs` - the output_device is calculated and assigned to DataNode.
-    // TODO(klecki): Are there any GPU ops that actually return CPU outputs?
-    bool mark_explicitly_contiguous = false;
     if (device == "cpu") {
-      DALI_ENFORCE(output_device == "cpu", "Only CPU operators can produce CPU outputs." +
-                                            error_str);
-    } else if (device == "gpu") {
-      if (output_device == "cpu") {
-        mark_explicitly_contiguous = true;
-      }
+      DALI_ENFORCE(output_device == StorageDevice::CPU,
+                   make_string("Error while specifying ", FormatOutput(spec, i),
+                               ". Only CPU operators can produce CPU outputs."));
     }
-
     // The edge describes that the named output of this operator produces the CPU or GPU data,
-    // the former for "cpu" ops, the latter for "mixed" and "gpu" (see Note above about the DALI
-    // CPU -> GPU flow).
-    // There are exceptions: we can have CPU output from Mixed MakeContiguous - see
-    // [cpu output of mixed] where we break the constraints from Python frontend.
+    // the former for "cpu" ops, the latter for "mixed" and "gpu".
     EdgeMeta meta = NewEdge(output_device);
-    if (mark_explicitly_contiguous) {
-      meta.has_contiguous = true;
-    }
 
     DALI_ENFORCE(edge_names_.insert({output_name, meta}).second,
-        "Output name insertion failure.");
+                 make_string("Error while specifying ", FormatOutput(spec, i), "node name: \"",
+                             output_name, "\". Output name insertion failure."));
   }
 
   // store updated spec
@@ -389,58 +404,54 @@ bool Pipeline::IsLogicalIdUsed(int logical_id) const {
   return logical_ids_.find(logical_id) != logical_ids_.end();
 }
 
-void Pipeline::AddToOpSpecs(const std::string &inst_name, const OpSpec &spec, int logical_id) {
+void Pipeline::AddToOpSpecs(std::string_view inst_name, const OpSpec &spec, int logical_id) {
   auto& logical_group = logical_ids_[logical_id];
   if (logical_group.size() > 0) {
-    const auto &group_name = op_specs_[logical_group.front()].spec.name();
+    const auto &group_name = op_specs_[logical_group.front()].spec.SchemaName();
     DALI_ENFORCE(
-        group_name == spec.name(),
-        "Different Operator types cannot be groupped with the same logical id. Tried to group " +
-            spec.name() + " using logical_id=" + std::to_string(logical_id) +
+        group_name == spec.SchemaName(),
+        "Different Operator types cannot be grouped with the same logical id. Tried to group `" +
+            GetOpDisplayName(spec, true) + "` using logical_id=" + std::to_string(logical_id) +
             " which is already assigned to " + group_name + ".");
-    const OpSchema &schema = SchemaRegistry::GetSchema(spec.name());
-    DALI_ENFORCE(schema.AllowsInstanceGrouping(),
-                 "Operator " + spec.name() + " does not support synced random execution required "
-                      "for multiple input sets processing.");
+    const OpSchema &schema = SchemaRegistry::GetSchema(spec.SchemaName());
   }
-  op_specs_.push_back({inst_name, spec, logical_id});
+  op_specs_.push_back({std::string(inst_name), spec, logical_id});
   logical_ids_[logical_id].push_back(op_specs_.size() - 1);
 }
 
-inline int GetMemoryHint(OpSpec &spec, int index) {
+inline int GetMemoryHint(const OpSpec &spec, int output_index) {
   if (!spec.HasArgument("bytes_per_sample_hint"))
     return 0;
   std::vector<int> hints;
   GetSingleOrRepeatedArg(spec, hints, "bytes_per_sample_hint", spec.NumOutput());
 
-  DALI_ENFORCE(index < static_cast<int>(hints.size()),
-               "Output index out of range: " + std::to_string(index));
-  return hints[index];
+  DALI_ENFORCE(output_index < static_cast<int>(hints.size()),
+               "Output index out of range: " + std::to_string(output_index));
+  return hints[output_index];
 }
 
-inline void SetMemoryHint(OpSpec &spec, int index, int value) {
+inline void SetMemoryHint(OpSpec &spec, int output_index, int value) {
   std::vector<int> hints;
   int no = spec.NumOutput();
 
-  DALI_ENFORCE(index < no, "Output index out of range: " +
-    std::to_string(index) + " >= " + std::to_string(no));
+  DALI_ENFORCE(output_index < no, "Output index out of range: " +
+    std::to_string(output_index) + " >= " + std::to_string(no));
 
   GetSingleOrRepeatedArg(spec, hints, "bytes_per_sample_hint", no);
-  hints[index] = value;
+  hints[output_index] = value;
   spec.SetArg("bytes_per_sample_hint", hints);
 }
 
-void Pipeline::PropagateMemoryHint(OpNode &node) {
-  assert(node.parents.size() == 1);
+void Pipeline::PropagateMemoryHint(graph::OpNode &node) {
   for (int inp_idx = 0; inp_idx < node.spec.NumRegularInput(); inp_idx++) {
-    auto input_name = node.spec.Input(inp_idx);
-    OpNodeId parent_node_id = graph_.TensorSourceID(input_name);
-    int idx = graph_.TensorIdxInSource(input_name);
-    auto &src = graph_.Node(parent_node_id);
-    int hint = GetMemoryHint(src.spec, idx);
-    if (hint) {
-      // inp_idx == out_idx for MakeContiguous
-      SetMemoryHint(node.spec, inp_idx, hint);
+    const auto &input_name = node.spec.Input(inp_idx);
+    const auto &data_node = graph_.GetData(input_name);
+    if (auto *src = data_node->producer.op) {
+      int hint = GetMemoryHint(src->spec, data_node->producer.idx);
+      if (hint) {
+        // inp_idx == out_idx for MakeContiguous
+        SetMemoryHint(node.spec, inp_idx, hint);
+      }
     }
   }
 }
@@ -463,104 +474,102 @@ void Pipeline::Build(std::vector<PipelineOutputDesc> output_descs) {
                make_string("User specified incorrect number of outputs (", num_outputs, ")."));
 
   executor_ =
-      GetExecutor(pipelined_execution_, separated_execution_, async_execution_, max_batch_size_,
-                  num_threads_, device_id_, bytes_per_sample_hint_, set_affinity_, max_num_stream_,
-                  default_cuda_stream_priority_, prefetch_queue_depth_);
+      GetExecutor(pipelined_execution_, separated_execution_, async_execution_, dynamic_execution_,
+                  max_batch_size_, num_threads_, device_id_, bytes_per_sample_hint_, set_affinity_,
+                  prefetch_queue_depth_);
   executor_->EnableMemoryStats(enable_memory_stats_);
   executor_->EnableCheckpointing(checkpointing_);
   executor_->Init();
-
-  // Creating the graph
-  for (auto& name_op_spec : op_specs_) {
-    string& inst_name = name_op_spec.instance_name;
-    OpSpec op_spec = name_op_spec.spec;
-    PrepareOpSpec(&op_spec, name_op_spec.logical_id);
-    try {
-      graph_.AddOp(op_spec, inst_name);
-    } catch (std::exception &e) {
-      int same_op_count = 0;
-      for (const auto& elem : op_specs_) {
-        if (elem.spec.name() == op_spec.name()) {
-          same_op_count++;
-        }
-        if (same_op_count > 1) {
-          break;
-        }
-      }
-      if (same_op_count > 1) {
-        throw std::runtime_error(make_string(
-            "Critical error when building pipeline:\nError when adding operator: ", op_spec.name(),
-            ", instance name: \"", inst_name, "\", encountered:\n", e.what(),
-            "\nCurrent pipeline object is no longer valid."));
-      } else {
-        throw std::runtime_error(make_string(
-            "Critical error when building pipeline:\nError when adding operator: ", op_spec.name(),
-            "\" encountered:\n", e.what(),
-            "\nCurrent pipeline object is no longer valid."));
-      }
-    } catch (...) {
-      throw std::runtime_error("Unknown critical error when building pipeline.");
-    }
-  }
 
   // Validate the output tensors names
   vector<string> outputs;
   for (const auto &out_desc : output_descs_) {
     string name = out_desc.name;
-    string device = out_desc.device;
+    auto device = out_desc.device;
     auto it = edge_names_.find(name);
     DALI_ENFORCE(it != edge_names_.end(), "Requested output name '" +
         name + "' is not known to the pipeline.");
 
-    if (device == "cpu") {
-      DALI_ENFORCE(it->second.has_cpu, "Requested cpu output '" +
-          name + "' only exists on gpu.");
-      // Add a make contiguous op to produce this output. [cpu output of mixed]
-      // TODO(klecki): we can revert back to using CPU stage here by changing mixed to cpu
-      auto output_name = AddMakeContiguousNode(it->second, name, "cpu", "mixed", "cpu");
-      if (!it->second.has_contiguous) {
-        it->second.has_contiguous = true;
+    if (device == StorageDevice::CPU) {
+      if (!it->second.has_cpu)
+        ToCPU(it);
+
+      if (!it->second.has_contiguous_cpu) {
+        // Add a make contiguous op to produce this output - we need pipeline outputs to be dense.
+        auto output_name = AddMakeContiguousNode(
+            it->second,
+            name,
+            StorageDevice::CPU,
+            "cpu",
+            StorageDevice::CPU);
+        outputs.push_back(output_name);
+      } else {
+        outputs.push_back(it->first + "_cpu");
       }
-      outputs.push_back(output_name);
-    } else if (device == "gpu") {
+
+    } else {
+      assert(device == StorageDevice::GPU);
       DALI_ENFORCE(device_id_ != CPU_ONLY_DEVICE_ID,
                    make_string(
                      "Cannot move the data node ", name, " to the GPU "
-                     "in a CPU-only pipeline. The `device_id` parameter "
-                     "is set to `CPU_ONLY_DEVICE_ID`. Set `device_id` "
+                     "in a CPU-only pipeline. The 'device_id' parameter "
+                     "is set to `CPU_ONLY_DEVICE_ID`. Set 'device_id' "
                      "to a valid GPU identifier to enable GPU features "
                      "in the pipeline."));
-      if (!it->second.has_gpu) {
-        DALI_ENFORCE(it->second.has_cpu, "Output '" + name +
-            "' exists on neither cpu or gpu, internal error");
-        // Add a copy to device to create the gpu output
-        auto output_name = AddMakeContiguousNode(it->second, name, "cpu", "mixed", "gpu");
+      if (!it->second.has_gpu)
+        ToGPU(it);
+
+      if (!it->second.has_contiguous_gpu) {
+        auto output_name = AddMakeContiguousNode(
+            it->second,
+            name,
+            StorageDevice::GPU,
+            "gpu",
+            StorageDevice::GPU);
         outputs.push_back(output_name);
       } else {
-        // Add an optional copy/pass through to normalize the output.
-        auto output_name = AddMakeContiguousNode(it->second, name, "gpu", "gpu", "gpu");
-        outputs.push_back(output_name);
+        outputs.push_back(it->first + "_gpu");
       }
-    } else {
-      DALI_FAIL("Invalid device argument \"" + device +
-          "\". Valid options are \"cpu\" or \"gpu\"");
     }
   }
 
-  for (int i = 0; i < graph_.NumOp(OpType::MIXED); i++) {
-    OpNode &node = graph_.Node(OpType::MIXED, i);
-    if (node.spec.name() == "MakeContiguous") {
+  // Creating the graph
+
+  for (auto &name_op_spec : op_specs_) {
+    const string &inst_name = name_op_spec.instance_name;
+    OpSpec op_spec = name_op_spec.spec;
+    try {
+      PrepareOpSpec(&op_spec, name_op_spec.logical_id);
+      graph_builder_.Add(inst_name, op_spec);
+    } catch (...) {
+      PropagateError({std::current_exception(),
+                      "Critical error when building pipeline:\n" + GetErrorContextMessage(op_spec),
+                      "\nCurrent pipeline object is no longer valid."});
+    }
+  }
+
+  for (auto &out : outputs)
+    graph_builder_.AddOutput(out);
+
+  graph_ = std::move(graph_builder_).GetGraph(true);
+
+  for (auto &node : graph_.OpNodes()) {
+    if (node.spec.SchemaName() == "MakeContiguous") {
       PropagateMemoryHint(node);
     }
   }
 
-  graph_.InstantiateOperators();
+  // Graph optimization goes here
+  if (IsCSEEnabled())
+    graph::EliminateCommonSubgraphs(graph_);
 
   // Load the final graph into the executor
-  executor_->Build(&graph_, outputs);
-
+  executor_->Build(graph_);
+  // CAUTION: Do not insert anything that can throw between `executor_->Build()` and
+  //          `DiscoverInputOperators`.
   DiscoverInputOperators();
-  repeat_last_.FindNodes(graph_);
+
+  repeat_last_.FindNodes(graph_, *executor_);
 
   built_ = true;
 }
@@ -582,19 +591,18 @@ void Pipeline::SetOutputDescs(std::vector<PipelineOutputDesc> output_descs) {
   output_descs_ = std::move(output_descs);
 }
 
-void Pipeline::RunCPU() {
+void Pipeline::Run() {
   DALI_ENFORCE(built_,
       "\"Build()\" must be called prior to executing the pipeline.");
-  repeat_last_.Refeed<CPUBackend>(*this);
-  repeat_last_.Refeed<GPUBackend>(*this);
-  executor_->RunCPU();
+  repeat_last_.Refeed(*this);
+  executor_->Run();
 }
 
-void Pipeline::RunGPU() {
+void Pipeline::Prefetch() {
   DALI_ENFORCE(built_,
       "\"Build()\" must be called prior to executing the pipeline.");
-  executor_->RunMixed();
-  executor_->RunGPU();
+  repeat_last_.Refeed(*this, true);
+  executor_->Prefetch();
 }
 
 bool Pipeline::ValidateOutputs(const Workspace &ws) const {
@@ -618,11 +626,8 @@ void Pipeline::Outputs(Workspace *ws) {
   DALI_ENFORCE(built_, "\"Build()\" must be called prior to executing the pipeline.");
   try {
     executor_->Outputs(ws);
-  } catch (std::exception &e) {
-    throw std::runtime_error(make_string("Critical error in pipeline:\n", std::string(e.what()),
-                                         "\nCurrent pipeline object is no longer valid."));
   } catch (...) {
-    throw std::runtime_error("Unknown critical error in pipeline.");
+    ProcessException(std::current_exception());
   }
 
   ValidateOutputs(*ws);
@@ -632,75 +637,73 @@ void Pipeline::ShareOutputs(Workspace *ws) {
   DALI_ENFORCE(built_, "\"Build()\" must be called prior to executing the pipeline.");
   try {
     executor_->ShareOutputs(ws);
-  } catch (std::exception &e) {
-    throw std::runtime_error(make_string("Critical error in pipeline:\n", std::string(e.what()),
-                                         "\nCurrent pipeline object is no longer valid."));
   } catch (...) {
-    throw std::runtime_error("Unknown critical error in pipeline.");
+    ProcessException(std::current_exception());
   }
 
   ValidateOutputs(*ws);
 }
 
 void Pipeline::ReleaseOutputs() {
-  DALI_ENFORCE(built_,
-      "\"Build()\" must be called prior to executing the pipeline.");
-    try {
-      executor_->ReleaseOutputs();
-    } catch (std::exception &e) {
-      throw std::runtime_error("Critical error in pipeline:\n"
-          + std::string(e.what())
-          + "\nCurrent pipeline object is no longer valid.");
-    } catch (...) {
-      throw std::runtime_error("Unknown critical error in pipeline.");
-    }
-}
-
-void Pipeline::SetupCPUInput(std::map<string, EdgeMeta>::iterator it, int input_idx, OpSpec *spec) {
-  auto [make_contiguous_spec, op_name, contiguous_output_name] =
-      PrepareMakeContiguousNode(it->second, it->first, "cpu", "mixed", "cpu");
-  if (!it->second.has_contiguous) {
-    // Note that we are returning [cpu output of mixed] Operator.
-    AddToOpSpecs(op_name, make_contiguous_spec, GetNextInternalLogicalId());
-    it->second.has_contiguous = true;
-    it->second.has_make_contiguous_cpu = true;
+  DALI_ENFORCE(built_, "\"Build()\" must be called prior to executing the pipeline.");
+  try {
+    executor_->ReleaseOutputs();
+  } catch (...) {
+    ProcessException(std::current_exception());
   }
-
-  // Update the OpSpec to use the contiguous input
-  auto& input_strs = spec->MutableInput(input_idx);
-  DALI_ENFORCE(input_strs.name == it->first, "Input at index " +
-      std::to_string(input_idx) + " does not match input iterator "
-      "name (" + input_strs.name + " v. " + it->first + ").");
-  input_strs.name = contiguous_output_name;
 }
 
-void Pipeline::SetupGPUInput(std::map<string, EdgeMeta>::iterator it) {
-  if (it->second.has_gpu) return;
+void Pipeline::ToCPU(std::map<string, EdgeMeta>::iterator it) {
+  // Insert a D2H copy, if needed
+  if (it->second.has_cpu)
+    return;
+  OpSpec copy_to_host_spec =
+    OpSpec("Copy")
+    .AddArg("device", "cpu")
+    .AddInput(it->first, StorageDevice::GPU)
+    .AddOutput(it->first, StorageDevice::CPU);
+  // don't put it into op_specs_for_serialization_, only op_specs_
+  AddToOpSpecs("__Copy_GpuToCpu_" + it->first, copy_to_host_spec, GetNextInternalLogicalId());
+  it->second.has_cpu = true;
+  it->second.has_contiguous_cpu = true;  // the result is always contiguous
+}
+
+void Pipeline::ToGPU(std::map<string, EdgeMeta>::iterator it) {
+  // Insert a H2D copy, if needed
+  if (it->second.has_gpu)
+    return;
   OpSpec copy_to_dev_spec =
     OpSpec("MakeContiguous")
     .AddArg("device", "mixed")
-    .AddInput(it->first, "cpu")
-    .AddOutput(it->first, "gpu");
+    .AddInput(it->first, StorageDevice::CPU)
+    .AddOutput(it->first, StorageDevice::GPU);
   // don't put it into op_specs_for_serialization_, only op_specs_
   AddToOpSpecs("__Copy_CpuToGpu_" + it->first, copy_to_dev_spec, GetNextInternalLogicalId());
   it->second.has_gpu = true;
+  it->second.has_contiguous_gpu = true;  // the result is always contiguous
 }
 
 void Pipeline::PrepareOpSpec(OpSpec *spec, int logical_id) {
-  if (logical_id_to_seed_.find(logical_id) == logical_id_to_seed_.end()) {
-    logical_id_to_seed_[logical_id] = seed_[current_seed_];
-  }
   spec->AddArg("max_batch_size", max_batch_size_)
     .AddArg("num_threads", num_threads_)
     .AddArg("device_id", device_id_)
-    .AddArg("checkpointing", checkpointing_)
-    .AddArgIfNotExisting("seed", logical_id_to_seed_[logical_id]);
+    .AddArg("checkpointing", checkpointing_);
   string dev = spec->GetArgument<string>("device");
   if (dev == "cpu" || dev == "mixed")
     spec->AddArg("cpu_prefetch_queue_depth", prefetch_queue_depth_.cpu_size);
   if (dev == "gpu" || dev == "mixed")
     spec->AddArg("gpu_prefetch_queue_depth", prefetch_queue_depth_.gpu_size);
-  current_seed_ = (current_seed_+1) % MAX_SEEDS;
+
+  if (spec->GetSchemaOrDefault().HasRandomSeedArg()) {
+    if (spec->ArgumentDefined("seed")) {
+      logical_id_to_seed_[logical_id] = spec->GetArgument<int64_t>("seed");
+    } else {
+      if (logical_id_to_seed_.find(logical_id) == logical_id_to_seed_.end())
+        logical_id_to_seed_[logical_id] = seed_[current_seed_];
+      spec->AddArg("seed", logical_id_to_seed_[logical_id]);
+      current_seed_ = (current_seed_+1) % MAX_SEEDS;
+    }
+  }
 }
 
 /**
@@ -709,14 +712,14 @@ void Pipeline::PrepareOpSpec(OpSpec *spec, int logical_id) {
  */
 void SerializeToProtobuf(dali_proto::OpDef *op, const string &inst_name, const OpSpec &spec,
                          int logical_id) {
-  op->set_name(spec.name());
+  op->set_name(spec.SchemaName());
   op->set_inst_name(inst_name);
   op->set_logical_id(logical_id);
 
   for (int i = 0; i < spec.NumInput(); ++i) {
     dali_proto::InputOutput *in = op->add_input();
     in->set_name(spec.InputName(i));
-    in->set_device(spec.InputDevice(i));
+    in->set_device(to_string(spec.InputDevice(i)));
     if (spec.IsArgumentInput(i)) {
         in->set_arg_name(spec.ArgumentInputName(i));
     }
@@ -726,23 +729,24 @@ void SerializeToProtobuf(dali_proto::OpDef *op, const string &inst_name, const O
   for (int i = 0; i < spec.NumOutput(); ++i) {
     dali_proto::InputOutput *out = op->add_output();
     out->set_name(spec.OutputName(i));
-    out->set_device(spec.OutputDevice(i));
+    out->set_device(to_string(spec.OutputDevice(i)));
     out->set_is_argument_input(false);
   }
 
   for (auto& a : spec.Arguments()) {
     // filter out args that need to be dealt with on
     // loading a serialized pipeline
-    if (a.first == "max_batch_size" ||
-        a.first == "num_threads" ||
-        a.first == "bytes_per_sample_hint") {
+    auto name = a->get_name();
+    if (name == "max_batch_size" ||
+        name == "num_threads" ||
+        name == "bytes_per_sample_hint") {
       continue;
     }
 
     dali_proto::Argument *arg = op->add_args();
     DaliProtoPriv arg_wrap(arg);
 
-    a.second->SerializeToProtobuf(&arg_wrap);
+    a->SerializeToProtobuf(&arg_wrap);
   }
 }
 
@@ -752,6 +756,7 @@ string Pipeline::SerializeToProtobuf() const {
   pipe.set_batch_size(this->max_batch_size());
   pipe.set_device_id(this->device_id());
   pipe.set_seed(this->original_seed_);
+  pipe.set_enable_checkpointing(this->checkpointing_);
 
   // loop over ops, create messages and append
   for (size_t i = 0; i < this->op_specs_for_serialization_.size(); ++i) {
@@ -760,8 +765,8 @@ string Pipeline::SerializeToProtobuf() const {
     const auto& p = this->op_specs_for_serialization_[i];
     const OpSpec& spec = p.spec;
 
-    DALI_ENFORCE(spec.GetSchema().IsSerializable(), "Could not serialize the operator: "
-                                                    + spec.name());
+    DALI_ENFORCE(spec.GetSchema().IsSerializable(), "Could not serialize the operator: `"
+                                                    + GetOpDisplayName(spec, true) + "`.");
 
     dali::SerializeToProtobuf(op_def, p.instance_name, spec, p.logical_id);
   }
@@ -771,7 +776,7 @@ string Pipeline::SerializeToProtobuf() const {
     dali_proto::InputOutput *out = pipe.add_pipe_outputs();
 
     out->set_name(output.name);
-    out->set_device(output.device);
+    out->set_device(to_string(output.device));
     out->set_is_argument_input(false);
     out->set_dtype(output.dtype);
     out->set_ndim(output.ndim);
@@ -782,82 +787,78 @@ string Pipeline::SerializeToProtobuf() const {
   return output;
 }
 
-OpNode * Pipeline::GetOperatorNode(const std::string& name) {
-  return &(graph_.Node(name));
+graph::OpNode *Pipeline::GetOperatorNode(std::string_view name) {
+  return graph_.GetOp(name);
 }
 
-const OpNode *Pipeline::GetInputOperatorNode(const std::string& name) {
-  for (auto &[op_name, node] : input_operators_) {
-    if (op_name == name) {
-      return node;
-    }
-  }
-  DALI_FAIL(make_string("Could not find an input operator with name \"", name, "\""));
+OperatorBase *Pipeline::GetOperator(std::string_view name) {
+  DALI_ENFORCE(built_, "\"Build()\" must be called prior to calling \"GetOperator()\".");
+  return executor_->GetOperator(name);
 }
 
-std::map<std::string, ReaderMeta> Pipeline::GetReaderMeta() {
-  std::map<std::string, ReaderMeta> ret;
-  for (Index i = 0; i < graph_.NumOp(); ++i) {
-    const OpNode &current = graph_.Node(i);
-    ReaderMeta meta = current.op->GetReaderMeta();
+const graph::OpNode *Pipeline::GetInputOperatorNode(std::string_view name) {
+  auto it = input_operators_.find(name);
+  if (it != input_operators_.end())
+    return it->second;
+  else
+    return nullptr;
+}
+
+std::map<std::string_view, ReaderMeta, std::less<>> Pipeline::GetReaderMeta() {
+  std::map<std::string_view, ReaderMeta, std::less<>> ret;
+  for (auto &op_node : graph_.OpNodes()) {
+    auto *op = GetOperator(op_node.instance_name);
+    if (!op)  // optimized-out or not yet instantiated
+      continue;
+    ReaderMeta meta = op->GetReaderMeta();
     if (meta) {
-      ret.insert(make_pair(current.instance_name, meta));
+      ret.emplace(op_node.instance_name, meta);
     }
   }
   return ret;
 }
 
-ReaderMeta Pipeline::GetReaderMeta(std::string name) {
-  ReaderMeta meta;
-  for (Index i = 0; i < graph_.NumOp(); ++i) {
-    const OpNode &current = graph_.Node(i);
-    if (current.instance_name == name) {
-      meta = current.op->GetReaderMeta();
-      break;
-    }
+ReaderMeta Pipeline::GetReaderMeta(std::string_view name) {
+  ReaderMeta meta{};
+  if (auto *op = executor_->GetOperator(name)) {
+    meta = op->GetReaderMeta();
   }
   return meta;
 }
 
+int Pipeline::InputFeedCount(std::string_view name) {
+  return executor_->InputFeedCount(name);
+}
 
-const TensorLayout &Pipeline::GetInputLayout(const std::string &name) {
+const TensorLayout &Pipeline::GetInputLayout(std::string_view name) {
   DALI_ENFORCE(built_, "\"Build()\" must be called prior to calling \"GetInputLayout()\".");
-  const auto *node = GetOperatorNode(name);
-  if (node->op_type == OpType::CPU) {
-    const auto *in_op = dynamic_cast<InputOperator<CPUBackend> *>(node->op.get());
-    if (in_op) {
-      return in_op->in_layout();
-    }
-  } else if (node->op_type == OpType::MIXED) {
-    const auto *in_op = dynamic_cast<InputOperator<MixedBackend> *>(node->op.get());
-    if (in_op) {
-      return in_op->in_layout();
-    }
-  } else if (node->op_type == OpType::GPU) {
-    const auto *in_op = dynamic_cast<InputOperator<GPUBackend> *>(node->op.get());
-    if (in_op) {
-      return in_op->in_layout();
-    }
-  }
+  auto *op = executor_->GetOperator(name);
+  if (const auto *in_op = dynamic_cast<InputOperator<CPUBackend> *>(op))
+    return in_op->in_layout();
+  if (const auto *in_op = dynamic_cast<InputOperator<MixedBackend> *>(op))
+    return in_op->in_layout();
+  if (const auto *in_op = dynamic_cast<InputOperator<GPUBackend> *>(op))
+    return in_op->in_layout();
   DALI_FAIL(make_string("Could not find an input operator named \"", name, "\"."));
 }
 
 
-int Pipeline::GetInputNdim(const std::string &name) {
+int Pipeline::GetInputNdim(std::string_view name) {
   DALI_ENFORCE(built_, "\"Build()\" must be called prior to calling \"GetInputNdim()\".");
   const auto *node = GetOperatorNode(name);
+  auto *op = executor_->GetOperator(name);
   if (node->op_type == OpType::CPU) {
-    const auto *in_op = dynamic_cast<InputOperator<CPUBackend> *>(node->op.get());
+    const auto *in_op = dynamic_cast<InputOperator<CPUBackend> *>(op);
     if (in_op) {
       return in_op->in_ndim();
     }
   } else if (node->op_type == OpType::MIXED) {
-    const auto *in_op = dynamic_cast<InputOperator<MixedBackend> *>(node->op.get());
+    const auto *in_op = dynamic_cast<InputOperator<MixedBackend> *>(op);
     if (in_op) {
       return in_op->in_ndim();
     }
   } else if (node->op_type == OpType::GPU) {
-    const auto *in_op = dynamic_cast<InputOperator<GPUBackend> *>(node->op.get());
+    const auto *in_op = dynamic_cast<InputOperator<GPUBackend> *>(op);
     if (in_op) {
       return in_op->in_ndim();
     }
@@ -866,21 +867,22 @@ int Pipeline::GetInputNdim(const std::string &name) {
 }
 
 
-DALIDataType Pipeline::GetInputDtype(const std::string &name) {
+DALIDataType Pipeline::GetInputDtype(std::string_view name) {
   DALI_ENFORCE(built_, "\"Build()\" must be called prior to calling \"GetInputDtype()\".");
   const auto *node = GetOperatorNode(name);
+  auto *op = executor_->GetOperator(name);
   if (node->op_type == OpType::CPU) {
-    const auto *in_op = dynamic_cast<InputOperator<CPUBackend> *>(node->op.get());
+    const auto *in_op = dynamic_cast<InputOperator<CPUBackend> *>(op);
     if (in_op) {
       return in_op->in_dtype();
     }
   } else if (node->op_type == OpType::MIXED) {
-    const auto *in_op = dynamic_cast<InputOperator<MixedBackend> *>(node->op.get());
+    const auto *in_op = dynamic_cast<InputOperator<MixedBackend> *>(op);
     if (in_op) {
       return in_op->in_dtype();
     }
   } else if (node->op_type == OpType::GPU) {
-    const auto *in_op = dynamic_cast<InputOperator<GPUBackend> *>(node->op.get());
+    const auto *in_op = dynamic_cast<InputOperator<GPUBackend> *>(op);
     if (in_op) {
       return in_op->in_dtype();
     }
@@ -906,7 +908,7 @@ const std::string &Pipeline::output_name(int id) const {
   return output_descs_[id].name;
 }
 
-const std::string &Pipeline::output_device(int id) const {
+StorageDevice Pipeline::output_device(int id) const {
   DALI_ENFORCE(built_, "\"Build()\" must be called prior to calling \"output_device()\".");
   DALI_ENFORCE_VALID_INDEX(id, output_descs_.size());
   return output_descs_[id].device;
@@ -925,13 +927,10 @@ int Pipeline::output_ndim(int id) const {
 }
 
 
-static bool is_input_operator(const OpNode &op_node) {
-  return (op_node.op_type == OpType::CPU &&
-          dynamic_cast<InputOperator<CPUBackend> *>(op_node.op.get())) ||
-         (op_node.op_type == OpType::MIXED &&
-          dynamic_cast<InputOperator<MixedBackend> *>(op_node.op.get())) ||
-         (op_node.op_type == OpType::GPU &&
-          dynamic_cast<InputOperator<GPUBackend> *>(op_node.op.get()));
+static bool is_input_operator(OperatorBase *op) {
+  return dynamic_cast<InputOperator<CPUBackend> *>(op) ||
+         dynamic_cast<InputOperator<MixedBackend> *>(op) ||
+         dynamic_cast<InputOperator<GPUBackend> *>(op);
 }
 
 
@@ -946,13 +945,17 @@ int Pipeline::num_outputs() const {
   return output_descs_.size();
 }
 
-std::vector<PipelineOutputDesc> Pipeline::output_descs() const {
+const std::vector<PipelineOutputDesc> &Pipeline::output_descs() const & {
   return output_descs_;
 }
 
-void Pipeline::SaveGraphToDotFile(const std::string &filename, bool show_tensors, bool show_ids,
+void Pipeline::SaveGraphToDotFile(const std::string &filename,
+                                  bool show_tensors,
                                   bool use_colors) {
-  graph_.SaveToDotFile(filename, show_tensors, show_ids, use_colors);
+  std::ofstream ofs(filename, std::ios::out);
+  if (!ofs)
+    DALI_FAIL("Cannot open \"", filename, "\" for writing.");
+  GenerateDOTFromGraph(ofs, graph_, show_tensors, use_colors);
 }
 
 int Pipeline::GetNextLogicalId() {
@@ -975,28 +978,18 @@ bool Pipeline::IsDeserializable(const std::string &serialized_pipeline) {
 
 void Pipeline::Shutdown() {
   DeviceGuard dg(device_id_);
-  auto& op_nodes = graph_.GetOpNodes();
-  for (auto & node : op_nodes) {
-    if (!is_input_operator(node)) continue;
-    OperatorBase *op_ptr = &(const_cast<dali::OpNode*>(&node)->InstantiateOperator());
-    switch (node.op_type) {
-      case OpType::CPU: {
-        auto *cpu_op_ptr = dynamic_cast<InputOperator<CPUBackend> *>(op_ptr);
-        assert(cpu_op_ptr);
-        cpu_op_ptr->BreakWaiting();
-      } break;
-      case OpType::MIXED: {
-        auto *mixed_op_ptr = dynamic_cast<InputOperator<MixedBackend> *>(op_ptr);
-        assert(mixed_op_ptr);
-        mixed_op_ptr->BreakWaiting();
-      } break;
-      case OpType::GPU: {
-        auto *gpu_op_ptr = dynamic_cast<InputOperator<GPUBackend> *>(op_ptr);
-        assert(gpu_op_ptr);
-        gpu_op_ptr->BreakWaiting();
-      } break;
-      default:
-        assert(false);  // This shouldn't happen.
+  for (auto &[name, node] : input_operators_) {
+    OperatorBase *op_ptr = executor_->GetOperator(name);
+    if (!op_ptr)
+      continue;
+    if (auto *cpu_op_ptr = dynamic_cast<InputOperator<CPUBackend> *>(op_ptr)) {
+      cpu_op_ptr->BreakWaiting();
+    } else if (auto *mixed_op_ptr = dynamic_cast<InputOperator<MixedBackend> *>(op_ptr)) {
+      mixed_op_ptr->BreakWaiting();
+    } else if (auto *gpu_op_ptr = dynamic_cast<InputOperator<GPUBackend> *>(op_ptr)) {
+      gpu_op_ptr->BreakWaiting();
+    } else {
+      assert(false);  // This shouldn't happen.
     }
   }
 
@@ -1005,13 +998,8 @@ void Pipeline::Shutdown() {
 }
 
 std::tuple<OpSpec, std::string, std::string> Pipeline::PrepareMakeContiguousNode(
-    EdgeMeta &meta, const std::string &input_name, const std::string &input_dev,
-    const std::string &device, const std::string &output_dev) {
-  // TODO(klecki): If outputs from CPU stage are enabled, adjust this.
-  DALI_ENFORCE(device != "cpu",
-               "CPU MakeContiguous nodes are not supposed to be inserted this way, only Mixed and "
-               "GPU nodes are currently used as outputs.");
-
+    EdgeMeta &meta, std::string_view input_name, StorageDevice input_dev,
+    std::string_view device, StorageDevice output_dev) {
   // Prefix for the output name to be generated, so it is distinct after being made contiguous.
   const char *cpu_to_cpu_out = "contiguous_cpu_to_cpu_";
   const char *gpu_to_gpu_out = "contiguous_gpu_to_gpu_";
@@ -1025,10 +1013,10 @@ std::tuple<OpSpec, std::string, std::string> Pipeline::PrepareMakeContiguousNode
   const char *output_prefix = nullptr;
   const char *op_name_prefix = nullptr;
 
-  if (input_dev == "cpu" && output_dev == "cpu") {
+  if (input_dev == StorageDevice::CPU && output_dev == StorageDevice::CPU) {
     output_prefix = cpu_to_cpu_out;
     op_name_prefix = cpu_to_cpu_name;
-  } else if (input_dev == "cpu" && output_dev == "gpu") {
+  } else if (input_dev == StorageDevice::CPU && output_dev == StorageDevice::GPU) {
     output_prefix = cpu_to_gpu_out;
     op_name_prefix = cpu_to_gpu_name;
   } else {
@@ -1036,71 +1024,102 @@ std::tuple<OpSpec, std::string, std::string> Pipeline::PrepareMakeContiguousNode
     op_name_prefix = gpu_to_gpu_name;
   }
 
-  std::string output_name = output_prefix + input_name;
-  std::string op_name = op_name_prefix + input_name;
+  std::string output_name = make_string(output_prefix, input_name);
+  std::string op_name = make_string(op_name_prefix, input_name);
 
   OpSpec spec = OpSpec("MakeContiguous")
                     .AddArg("device", device)
-                    .AddInput(input_name, input_dev)
+                    .AddInput(std::string(input_name), input_dev)
                     .AddOutput(output_name, output_dev);
   return {spec, op_name, output_name};
 }
 
 
-std::string Pipeline::AddMakeContiguousNode(EdgeMeta &meta, const std::string &input_name,
-                                            const std::string &input_dev, const std::string &device,
-                                            const std::string &output_dev) {
+std::string Pipeline::AddMakeContiguousNode(EdgeMeta &meta,
+                                            std::string_view input_name,
+                                            StorageDevice input_dev,
+                                            std::string_view device,
+                                            StorageDevice output_dev) {
   auto [spec, op_name, output_name] =
       PrepareMakeContiguousNode(meta, input_name, input_dev, device, output_dev);
-  std::string output_name_and_device =  output_name + "_" + output_dev;
+  std::string output_name_and_device =  make_string(output_name, "_", output_dev);
 
-  if ((output_dev == "cpu" && meta.has_make_contiguous_cpu) ||
-      (output_dev == "gpu" && meta.has_make_contiguous_gpu)) {
+  if ((output_dev == StorageDevice::CPU && meta.has_make_contiguous_cpu) ||
+      (output_dev == StorageDevice::GPU && meta.has_make_contiguous_gpu)) {
     return output_name_and_device;
   }
 
   // Add a make contiguous op to produce this output
-  PrepareOpSpec(&spec, GetNextInternalLogicalId());
-  graph_.AddOp(spec, op_name);
+  auto id = GetNextInternalLogicalId();
+  AddToOpSpecs(op_name, std::move(spec), id);
 
-  if (output_dev == "cpu") {
+  if (output_dev == StorageDevice::CPU) {
     meta.has_make_contiguous_cpu = true;
   }
-  if (output_dev == "gpu") {
+  if (output_dev == StorageDevice::GPU) {
     meta.has_make_contiguous_gpu = true;
   }
   return output_name_and_device;
 }
 
 
-void Pipeline::DiscoverInputOperators() {
-  auto& op_nodes = graph_.GetOpNodes();
-  for (const auto & node : op_nodes) {
-    if (is_input_operator(node)) {
+void Pipeline::DiscoverInputOperators() noexcept {
+  auto& op_nodes = graph_.OpNodes();
+  for (const auto &node : op_nodes) {
+    auto *op = executor_->GetOperator(node.instance_name);
+    if (is_input_operator(op)) {
       input_operators_.insert(std::make_pair(node.instance_name, &node));
     }
   }
 }
 
+void Pipeline::ProcessException(std::exception_ptr eptr) {
+  PropagateError(
+      {eptr, "Critical error in pipeline:\n", "\nCurrent pipeline object is no longer valid."});
+}
 
-void Pipeline::RepeatLastInputs::FindNodes(const OpGraph &graph) {
-  for (const auto &node : graph.GetOpNodes()) {
-    if (node.spec.name() != "ExternalSource")
+void Pipeline::RepeatLastInputs::FindNodes(const graph::OpGraph &graph, ExecutorBase &exec) {
+  for (const auto &node : graph.OpNodes()) {
+    if (node.spec.SchemaName() != "ExternalSource")
       continue;
 
     bool repeat_last = false;
     if (!node.spec.TryGetArgument(repeat_last, "repeat_last") || !repeat_last)
       continue;
 
+    auto op = exec.GetOperator(node.instance_name);
+
     if (node.op_type == OpType::GPU)
-      gpu_nodes_[node.instance_name] = { &node };
+      gpu_nodes_[node.instance_name] = { &node, dynamic_cast<Operator<GPUBackend>*>(op) };
     else if (node.op_type == OpType::CPU)
-      cpu_nodes_[node.instance_name] = { &node };
+      cpu_nodes_[node.instance_name] = { &node, dynamic_cast<Operator<CPUBackend>*>(op) };
     else if (node.op_type == OpType::MIXED)
-      mixed_nodes_[node.instance_name] = { &node };
+      mixed_nodes_[node.instance_name] = { &node, dynamic_cast<Operator<MixedBackend>*>(op) };
     else
       assert(!"Unexpected backend for an ExternalSource node.");
   }
+}
+
+template <typename Backend>
+void Pipeline::RepeatLastInputs::Refeed(Pipeline &owner, bool fill_queue) {
+  auto &nodes = GetNodes<Backend>();
+  for (auto &[name, node] : nodes) {
+    int count = fill_queue ? owner.InputFeedCount(name) : 1;
+    for (int i = 0; i < count; i++)
+      owner.SetExternalInputHelper(
+          node.op_node->instance_name,
+          node.last_input,
+          node.data_id,
+          node.last_input.order(),
+          InputOperatorSettingMode{false, false, InputOperatorCopyMode::FORCE_NO_COPY},
+          true);
+  }
+}
+
+void Pipeline::RepeatLastInputs::Refeed(Pipeline &owner, bool fill_queue) {
+  Refeed<CPUBackend>(owner, fill_queue);
+  Refeed<MixedBackend>(owner, fill_queue);
+  Refeed<GPUBackend>(owner, fill_queue);
 }
 
 }  // namespace dali

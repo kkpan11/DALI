@@ -1,4 +1,4 @@
-// Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,7 +18,6 @@
 #include "dali/core/cuda_stream_pool.h"
 #include "dali/core/cuda_event.h"
 #include "dali/kernels/dynamic_scratchpad.h"
-#include "dali/kernels/scratch.h"
 #include "dali/kernels/slice/slice_cpu.h"
 #include "dali/kernels/slice/slice_flip_normalize_gpu.h"
 #include "dali/kernels/slice/slice_flip_normalize_permute_pad_gpu.h"
@@ -79,8 +78,8 @@ class SliceFlipNormalizeGPUTest : public ::testing::Test {
   }
 
   void LoadTensor(Tensor<CPUBackend> &tensor, const std::string& path_npy) {
-    auto stream = FileStream::Open(path_npy, false, false);
-    tensor = ::dali::numpy::ReadTensor(stream.get());
+    auto stream = FileStream::Open(path_npy);
+    tensor = ::dali::numpy::ReadTensor(stream.get(), true);
   }
 
   template <typename T, int ndim>

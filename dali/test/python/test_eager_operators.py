@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -130,7 +130,9 @@ def test_identical_rng_states_interleaved():
 def test_objective_eager_resize():
     from nvidia.dali._utils import eager_utils
 
-    resize_class = eager_utils._eager_op_object_factory(ops.python_op_factory("Resize"), "Resize")
+    resize_class = eager_utils._eager_op_object_factory(
+        ops.python_op_factory("Resize", "Resize"), "Resize"
+    )
     tl = tensors.TensorListCPU(
         np.random.default_rng().integers(256, size=(8, 200, 200, 3), dtype=np.uint8)
     )
@@ -157,11 +159,10 @@ def test_mixed_devices_decoder():
     file_root = os.path.join(get_dali_extra_path(), "db/single/jpeg")
 
     pipe = mixed_image_decoder_pipeline(file_root, seed, batch_size=batch_size)
-    pipe.build()
     (pipe_out,) = pipe.run()
 
     jpeg, _ = next(eager.readers.file(file_root=file_root, batch_size=batch_size, seed=seed))
-    eager_out = eager.decoders.image(jpeg, device="gpu")
+    eager_out = eager.decoders.image(jpeg, device="mixed")
 
     assert len(pipe_out) == len(eager_out)
 

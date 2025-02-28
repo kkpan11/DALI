@@ -1,4 +1,4 @@
-// Copyright (c) 2017-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2017-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -29,6 +29,8 @@
 #include "dali/operators/reader/loader/loader.h"
 #include "dali/operators/reader/parser/parser.h"
 #include "dali/pipeline/operator/checkpointing/snapshot_serializer.h"
+#include "dali/pipeline/operator/checkpointing/op_checkpoint.h"
+#include "dali/pipeline/operator/name_utils.h"
 #include "dali/pipeline/operator/operator.h"
 
 namespace dali {
@@ -104,7 +106,7 @@ class DataReader : public Operator<Backend> {
 
   void SaveState(OpCheckpoint &cpt, AccessOrder order) override {
     if constexpr (!supports_checkpointing) {
-      DALI_FAIL(make_string("The reader ", spec_.name(), " does not support checkpointing."));
+      DALI_FAIL("The reader `", GetOpDisplayName(spec_, true), "` does not support checkpointing.");
     } else {
       DALI_ENFORCE(checkpointing_,
                    "Cannot save the checkpoint, because "
@@ -116,7 +118,7 @@ class DataReader : public Operator<Backend> {
 
   void RestoreState(const OpCheckpoint &cpt) override {
     if constexpr (!supports_checkpointing) {
-      DALI_FAIL(make_string("The reader ", spec_.name(), " does not support checkpointing."));
+      DALI_FAIL("The reader `", GetOpDisplayName(spec_, true), "` does not support checkpointing.");
     } else {
       DALI_ENFORCE(checkpointing_,
                    "Cannot restore the checkpoint, because "
@@ -138,7 +140,7 @@ class DataReader : public Operator<Backend> {
 
   // Main prefetch work loop
   void PrefetchWorker() {
-    SetThreadName(make_string("PrefetchWorker ", spec_.name()).c_str());
+    SetThreadName(make_string("PrefetchWorker ", spec_.SchemaName()).c_str());
     DeviceGuard g(device_id_);
     ProducerWait();
     while (!finished_) {
@@ -170,6 +172,10 @@ class DataReader : public Operator<Backend> {
       prefetch_thread_.join();
       prefetch_thread_ = {};
     }
+  }
+
+  bool HasContiguousOutputs() const override {
+    return false;
   }
 
   bool SetupImpl(std::vector<OutputDesc> &output_desc, const Workspace &ws) override {

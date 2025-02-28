@@ -13,15 +13,17 @@
 # limitations under the License.
 
 import inspect
-import pickle
+import pickle  # nosec B403
 import sys
 import types
 import marshal
 import importlib
 
 
-def dummy_lambda():
-    pass
+# Don't allow any reformatters turning it into regular `def` function.
+# The whole point of this object is to have
+# properties (name) specific to lambda.
+dummy_lambda = lambda: 0  # noqa: E731
 
 
 # unfortunately inspect.getclosurevars does not yield global names referenced by
@@ -48,7 +50,7 @@ def set_funcion_state(fun, state):
 
 
 def function_unpickle(name, qualname, code, closure):
-    code = marshal.loads(code)
+    code = marshal.loads(code)  # nosec B302
     global_scope = {"__builtins__": __builtins__}
     fun = types.FunctionType(code, global_scope, name, closure=closure)
     fun.__qualname__ = qualname
@@ -121,9 +123,13 @@ class DaliCallbackPickler(pickle.Pickler):
             try:
                 pickle.dumps(obj)
             except AttributeError as e:
-                if "Can't pickle local object" in str(e):
+                str_e = str(e)
+                # For Python <3.12.5 and 3.12.5 respectively.
+                if "Can't pickle local object" in str_e or "Can't get local object" in str_e:
                     return function_by_value_reducer(obj)
             except pickle.PicklingError as e:
-                if "it's not the same object as" in str(e):
+                str_e = str(e)
+                # For jupyter notebook issues and Python 3.12.5+ respectively
+                if "it's not the same object as" in str_e or "Can't pickle local object" in str_e:
                     return function_by_value_reducer(obj)
         return NotImplemented

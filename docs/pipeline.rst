@@ -33,7 +33,8 @@ Example::
 
     @pipeline_def  # create a pipeline with processing graph defined by the function below
     def my_pipeline():
-        """ Create a pipeline which reads images and masks, decodes the images and returns them. """
+        """ Create a pipeline which reads images and masks, decodes the images and
+            returns them. """
         img_files, labels = fn.readers.file(file_root="image_dir", seed=1)
         mask_files, _ = fn.readers.file(file_root="mask_dir", seed=1)
         images = fn.decoders.image(img_files, device="mixed")
@@ -41,7 +42,6 @@ Example::
         return images, masks, labels
 
     pipe = my_pipeline(batch_size=4, num_threads=2, device_id=0)
-    pipe.build()
 
 
 The resulting graph is:
@@ -49,6 +49,13 @@ The resulting graph is:
 .. image:: images/two_readers.svg
 
 .. _processing_graph_structure:
+
+.. important::
+    The pipeline definition function is excuted only once, when the pipeline is built,
+    and typically returns a ``dali.DataNode`` object or a tuple of thereof.
+    For convenience, it's possible to return other types, such as NumPy arrays, but those
+    are treated as constants and evaluated only once.
+
 
 Processing Graph Structure
 ^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -93,7 +100,6 @@ Example::
         return flipped, labels.gpu()
 
     pipe = my_pipeline(batch_size=4, num_threads=2, device_id=0)
-    pipe.build()
 
 .. note::
     If the ``device`` parameter is not specified, it is selected automatically based on the
@@ -176,6 +182,11 @@ allows the same input types as ``if`` statement condition. Logical expression fo
 shortcutting rules when they are evaluated.
 
 You can read more in the `conditional tutorial <examples/general/conditionals.html>`_.
+
+Preventing AutoGraph conversion
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. autodecorator:: nvidia.dali.pipeline.do_not_convert
 
 .. _pipeline_class:
 

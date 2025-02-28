@@ -1,4 +1,4 @@
-# Copyright (c) 2020-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2020-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -41,7 +41,6 @@ class ExternalSourcePipe(Pipeline):
 def test_tensorlist_getitem_gpu():
     arr = np.random.rand(3, 5, 6)
     pipe = ExternalSourcePipe(arr.shape[0], arr)
-    pipe.build()
     tensorlist = pipe.run()[0]
     list_of_tensors = [x for x in tensorlist]
 
@@ -58,7 +57,6 @@ def test_tensorlist_getitem_gpu():
 def test_data_ptr_tensor_gpu():
     arr = np.random.rand(3, 5, 6)
     pipe = ExternalSourcePipe(arr.shape[0], arr)
-    pipe.build()
     tensor = pipe.run()[0][0]
     from_tensor = py_buffer_from_address(
         tensor.data_ptr(), tensor.shape(), types.to_numpy_type(tensor.dtype), gpu=True
@@ -70,7 +68,6 @@ def test_data_ptr_tensor_gpu():
 def test_data_ptr_tensor_list_gpu():
     arr = np.random.rand(3, 5, 6)
     pipe = ExternalSourcePipe(arr.shape[0], arr)
-    pipe.build()
     tensor_list = pipe.run()[0]
     tensor = tensor_list.as_tensor()
     from_tensor = py_buffer_from_address(
@@ -83,7 +80,6 @@ def test_data_ptr_tensor_list_gpu():
 def test_cuda_array_interface_tensor_gpu():
     arr = np.random.rand(3, 5, 6)
     pipe = ExternalSourcePipe(arr.shape[0], arr)
-    pipe.build()
     tensor_list = pipe.run()[0]
     assert tensor_list[0].__cuda_array_interface__["data"][0] == tensor_list[0].data_ptr()
     assert not tensor_list[0].__cuda_array_interface__["data"][1]
@@ -97,7 +93,6 @@ def test_cuda_array_interface_tensor_gpu():
 def test_cuda_array_interface_tensor_gpu_create():
     arr = np.random.rand(3, 5, 6)
     pipe = ExternalSourcePipe(arr.shape[0], arr)
-    pipe.build()
     tensor_list = pipe.run()[0]
     assert cp.allclose(arr[0], cp.asanyarray(tensor_list[0]))
 
@@ -105,7 +100,6 @@ def test_cuda_array_interface_tensor_gpu_create():
 def test_cuda_array_interface_tensor_list_gpu_create():
     arr = np.random.rand(3, 5, 6)
     pipe = ExternalSourcePipe(arr.shape[0], arr)
-    pipe.build()
     tensor_list = pipe.run()[0]
     assert cp.allclose(arr, cp.asanyarray(tensor_list.as_tensor()))
 
@@ -113,7 +107,6 @@ def test_cuda_array_interface_tensor_list_gpu_create():
 def test_cuda_array_interface_tensor_gpu_create_copy_kernel():
     arr = np.random.rand(3, 5, 6)
     pipe = ExternalSourcePipe(arr.shape[0], arr, use_copy_kernel=True)
-    pipe.build()
     tensor_list = pipe.run()[0]
     assert cp.allclose(arr[0], cp.asanyarray(tensor_list[0]))
 
@@ -121,7 +114,6 @@ def test_cuda_array_interface_tensor_gpu_create_copy_kernel():
 def test_cuda_array_interface_tensor_list_gpu_create_copy_kernel():
     arr = np.random.rand(3, 5, 6)
     pipe = ExternalSourcePipe(arr.shape[0], arr, use_copy_kernel=True)
-    pipe.build()
     tensor_list = pipe.run()[0]
     assert cp.allclose(arr, cp.asanyarray(tensor_list.as_tensor()))
 
@@ -166,6 +158,20 @@ def test_cuda_array_interface_tensor_list_gpu_direct_creation_list():
     arr = cp.random.rand(3, 5, 6)
     tensor_list = TensorListGPU([arr], "NHWC")
     assert cp.allclose(arr.reshape(tuple([1]) + arr.shape), cp.asanyarray(tensor_list.as_tensor()))
+
+
+def test_cuda_array_interface_v3_stream():
+    import pycuda.gpuarray as gpuarray
+    import pycuda.driver as cuda
+    from pycuda.tools import clear_context_caches, make_default_context
+
+    cuda.init()
+    context = make_default_context()
+    test_input = np.random.randn(4, 4).astype(np.float32)
+    g = gpuarray.to_gpu(test_input)
+    TensorGPU(g)
+    context.pop()
+    clear_context_caches()
 
 
 def test_dlpack_tensor_list_gpu_direct_creation():
@@ -366,11 +372,10 @@ def test_tensor_from_tensor_list_gpu():
         np.testing.assert_array_equal(np.array(t.as_cpu()), np.full((4,), i // 3))
 
 
-def test_tensor_expose_dlpack_capsule():
+def test_tensor_dlpack_export():
     arr = cp.arange(20)
     tensor = TensorGPU(arr, "NHWC")
 
-    capsule = tensor._expose_dlpack_capsule()
-    arr_from_dlpack = cp.from_dlpack(capsule)
+    arr_from_dlpack = cp.from_dlpack(tensor)
 
     assert cp.array_equal(arr, arr_from_dlpack)

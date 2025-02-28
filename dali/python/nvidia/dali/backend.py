@@ -1,4 +1,4 @@
-# Copyright (c) 2017-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2017-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,7 +15,6 @@
 from nvidia.dali.backend_impl import (
     Init,
     OpSpec,
-    LoadLibrary,
     GetCudaVersion,
     GetCufftVersion,
     GetNppVersion,
@@ -27,13 +26,7 @@ from nvidia.dali.backend_impl import *  # noqa: F401, F403
 
 from . import __cuda_version__
 import warnings
-import os
 import sys
-
-# Note: If we ever need to add more complex functionality
-# for importing the DALI c++ extensions, we can do it here
-
-default_plugins = []
 
 
 def deprecation_warning(what):
@@ -47,14 +40,6 @@ initialized = False
 if not initialized:
     Init(OpSpec("CPUAllocator"), OpSpec("PinnedCPUAllocator"), OpSpec("GPUAllocator"))
     initialized = True
-
-    # py3.12 warning
-    if sys.version_info[0] == 3 and sys.version_info[1] >= 12:
-        deprecation_warning(
-            "DALI support for Python {0}.{1} is experimental and some "
-            "functionalities may not work."
-            "".format(sys.version_info[0], sys.version_info[1])
-        )
 
     # py3.6 warning
     if sys.version_info[0] == 3 and sys.version_info[1] == 6:
@@ -70,15 +55,15 @@ if not initialized:
             "Please update your environment to use Python 3.8, "
             "3.9, 3.10, or (experimentally) 3.11."
         )
+    # py3.13 warning
+    if sys.version_info[0] == 3 and sys.version_info[1] == 13:
+        deprecation_warning("Python 3.13 support is experimental and not officially tested.")
 
     if int(str(__cuda_version__)[:2]) < 11:
         deprecation_warning(
             "DALI 1.21 is the last official release that supports CUDA 10.2. "
             "Please update your environment to CUDA version 11 or newer."
         )
-
-    for lib in default_plugins:
-        LoadLibrary(os.path.join(os.path.dirname(__file__), lib))
 
 cuda_checked = False
 

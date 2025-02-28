@@ -1,4 +1,4 @@
-# Copyright (c) 2017-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2017-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -43,22 +43,22 @@ endif()
 
 if (BUILD_DALI_PIPELINE)
   add_subdirectory(pipeline)
-  add_subdirectory(image)
   add_subdirectory(util)
   add_subdirectory(plugin)
   add_subdirectory(c_api)
+  add_subdirectory(c_api_2)
 endif()
 
-if (BUILD_NVJPEG AND (BUILD_DALI_OPERATORS OR BUILD_DALI_IMGCODEC))
-  add_subdirectory(nvjpeg)
-endif()
+if(BUILD_DALI_OPERATORS)
+  if(BUILD_NVJPEG)
+    add_subdirectory(nvjpeg)
+  endif()
 
-if (BUILD_DALI_OPERATORS)
+  if(BUILD_NVIMAGECODEC)
+    add_subdirectory(nvimgcodec)
+  endif()
+
   add_subdirectory(operators)
-endif()
-
-if (BUILD_DALI_IMGCODEC)
-  add_subdirectory(imgcodec)
 endif()
 
 # Collect source files for dali
@@ -91,6 +91,11 @@ endif(BUILD_NVML)
 
 if (BUILD_CUFILE)
   target_link_libraries(dali PRIVATE dynlink_cufile)
+endif()
+
+if (BUILD_AWSSDK)
+  target_include_directories(dali PRIVATE ${AWSSDK_INCLUDE_DIR})
+  target_link_libraries(dali PRIVATE ${AWSSDK_LIBRARIES})
 endif()
 
 # Build test suite
@@ -163,9 +168,13 @@ endif()
 # Copy all headers from DALI_INST_HDRS list to DALI_WHEEL_DIR using install command
 # with `-D` option, that recursively creates missing directories in destination path
 if (BUILD_PYTHON)
-  add_custom_target(install_headers ALL
-      DEPENDS dali dali_operators
-      )
+  if (PREBUILD_DALI_LIBS)
+    add_custom_target(install_headers ALL)
+  else (PREBUILD_DALI_LIBS)
+    add_custom_target(install_headers ALL
+        DEPENDS dali dali_operators
+        )
+  endif (PREBUILD_DALI_LIBS)
 
   # Process the DALI_INST_HDRS list
   foreach(INSTALL_HEADER ${DALI_INST_HDRS})

@@ -25,7 +25,6 @@
 #include "dali/core/error_handling.h"
 #include "dali/core/static_switch.h"
 #include "dali/kernels/kernel_manager.h"
-#include "dali/kernels/scratch.h"
 #include "dali/kernels/slice/slice_flip_normalize_permute_pad_common.h"
 #include "dali/operators/generic/slice/out_of_bounds_policy.h"
 #include "dali/operators/image/crop/crop_attr.h"
@@ -117,10 +116,6 @@ class CropMirrorNormalize : public StatelessOperator<Backend> {
   bool SetupImpl(std::vector<OutputDesc> &output_desc, const Workspace &ws) override;
 
   void RunImpl(Workspace &ws) override;
-
-  bool CanInferOutputs() const override {
-    return true;
-  }
 
   void ProcessNormArgs(int sample_idx) {
     span<const float> mean_arg(mean_arg_[sample_idx].data, mean_arg_[sample_idx].num_elements());

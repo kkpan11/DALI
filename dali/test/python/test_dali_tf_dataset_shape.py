@@ -1,4 +1,4 @@
-# Copyright (c) 2020-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2020-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,8 +20,7 @@ import nvidia.dali.types as dali_types
 from test_utils_tensorflow import skip_for_incompatible_tf
 
 import os
-from nose.tools import assert_equals
-from nose_utils import raises
+from nose_utils import raises, assert_equals
 import itertools
 import warnings
 
@@ -57,7 +56,6 @@ def dali_pipe_batch_1(shapes, types, as_single_tuple=False):
     ds = dali_tf.DALIDataset(pipe, batch_size=1, output_dtypes=types, output_shapes=shapes)
     # for clarity, we could have used the previous `pipe`
     pipe_ref = TestPipeline(batch_size=1, seed=0, device_id=0, num_threads=4)
-    pipe_ref.build()
 
     ds_iter = iter(ds)
     # See if the iteration over different images works
@@ -150,9 +148,7 @@ def test_batch_N_valid_shapes():
     # Omitted batch of size `1`
     output_shape = (200, 200, 3)
     for i in range(2 ** len(output_shape)):
-        noned_shape = tuple(
-            (dim if i & (2**idx) else None) for idx, dim in enumerate(output_shape)
-        )
+        noned_shape = tuple((dim if i & (2**idx) else None) for idx, dim in enumerate(output_shape))
         yield dali_pipe_batch_N, noned_shape, tf.uint8, 1
 
 

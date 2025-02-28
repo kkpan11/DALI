@@ -1,4 +1,4 @@
-# Copyright (c) 2020-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2020-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,12 +14,11 @@
 
 import nvidia.dali.fn as fn
 from nvidia.dali.pipeline import Pipeline
-from nose.tools import nottest
+from nose_utils import nottest, assert_raises
 
 import numpy as np
 
 from test_utils import np_type_to_dali
-from nose_utils import assert_raises
 
 
 class Batch:
@@ -160,8 +159,6 @@ def run_dali(
             reduced_gpu = reduce_fn(input.gpu(), mean.gpu(), **args)
         pipe.set_outputs(reduced_cpu, reduced_gpu)
 
-    pipe.build()
-
     for _ in range(batch_fn.num_iter()):
         output = pipe.run()
         check_layout(output[0], layout, axes, keep_dims)
@@ -294,7 +291,7 @@ def test_reduce_invalid_axes():
     dali_reduce_fn, numpy_reduce_fn = reduce_fns["sum"]
 
     for axes in batch_fn.valid_axes():
-        with assert_raises(RuntimeError, glob="Axis index out of range"):
+        with assert_raises(IndexError, glob="Axis index out of range"):
             dali_res_cpu, dali_res_gpu = run_dali(
                 dali_reduce_fn, batch_fn, keep_dims=False, axes=axes, output_type=np.uint8
             )
@@ -456,7 +453,6 @@ def run_reduce_with_layout(batch_size, get_batch, reduction, axes, axis_names, b
         reduced_by_name = reduction(input, keep_dims=False, axis_names=axis_names)
 
     pipe.set_outputs(reduced, reduced_by_name)
-    pipe.build()
 
     run_and_compare_with_layout(batch_fn, pipe)
 
@@ -472,7 +468,6 @@ def run_reduce_with_layout_with_mean_input(
         reduced_by_name = reduction(input, mean, keep_dims=False, axis_names=axis_names)
 
     pipe.set_outputs(reduced, reduced_by_name)
-    pipe.build()
 
     run_and_compare_with_layout(batch_fn, pipe)
 
@@ -579,7 +574,6 @@ def _test_reduce_large_data(rank, axes, device, in_layout):
     input = fn.external_source(data, cycle=True, device=device, layout=in_layout)
     reduced = fn.reductions.sum(input, axes=axes)
     pipe.set_outputs(reduced)
-    pipe.build()
 
     for b, batch in enumerate(data):
         (out,) = pipe.run()
@@ -616,7 +610,6 @@ def _test_std_dev_large_data(rank, axes, device, in_layout):
     mean = fn.reductions.mean(input, axes=axes)
     reduced = fn.reductions.std_dev(input, mean, axes=axes, ddof=0)
     pipe.set_outputs(reduced)
-    pipe.build()
 
     for b, batch in enumerate(data):
         (out,) = pipe.run()

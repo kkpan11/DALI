@@ -1,4 +1,4 @@
-# Copyright (c) 2019-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2019-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -264,8 +264,175 @@ if (BUILD_CVCUDA)
   set(DALI_BUILD_PYTHON ${BUILD_PYTHON})
   set(BUILD_PYTHON OFF)
   # for now we use only median blur from CV-CUDA
-  set(CV_CUDA_SRC_PATERN medianblur median_blur)
+  set(CV_CUDA_SRC_PATERN medianblur median_blur morphology warp HQResize)
   check_and_add_cmake_submodule(${PROJECT_SOURCE_DIR}/third_party/cvcuda)
-  list(APPEND DALI_LIBS cvcuda nvcv_types)
   set(BUILD_PYTHON ${DALI_BUILD_PYTHON})
+endif()
+
+##################################################################
+# nvimagecodec
+##################################################################
+set(DALI_INSTALL_REQUIRES_NVIMGCODEC "")
+set(DALI_INSTALL_REQUIRES_NVJPEG2K "")
+set(DALI_INSTALL_REQUIRES_NVTIFF "")
+if(BUILD_NVIMAGECODEC)
+  set(NVJPEG2K_MIN_VERSION "0.8.0")
+  set(NVJPEG2K_MAX_VERSION "0.9.0")
+
+  set(NVTIFF_MIN_VERSION "0.4.0")
+  set(NVTIFF_MAX_VERSION "0.5.0")
+
+  set(NVIMGCODEC_MIN_VERSION "0.4.1")
+  set(NVIMGCODEC_MAX_VERSION "0.5.0")
+  message(STATUS "nvImageCodec - requires version >=${NVIMGCODEC_MIN_VERSION}, <${NVIMGCODEC_MAX_VERSION}")
+  if (WITH_DYNAMIC_NVIMGCODEC)
+    message(STATUS "nvImageCodec - dynamic load")
+
+    # Silence DOWNLOAD_EXTRACT_TIMESTAMP warning in CMake 3.24:
+    if (CMAKE_VERSION VERSION_GREATER_EQUAL "3.24.0")
+      cmake_policy(SET CMP0135 NEW)
+    endif()
+
+    # Note: We are getting the x86_64 tarball, but we are only interested in the headers.
+    include(FetchContent)
+    FetchContent_Declare(
+      nvimgcodec_headers
+      URL      https://developer.download.nvidia.com/compute/nvimgcodec/redist/nvimgcodec/linux-x86_64/nvimgcodec-linux-x86_64-0.4.1.21-archive.tar.xz
+      URL_HASH SHA512=3f20f6944a360597586bfe3550a0605257bcd944748477a869691ec1a42716e3722f8ddbd0b525995ebab89a33cd91ed82d5b151194008f1a8424971448a4824
+    )
+    FetchContent_Populate(nvimgcodec_headers)
+    set(nvimgcodec_SEARCH_PATH "${nvimgcodec_headers_SOURCE_DIR}/${CUDA_VERSION_MAJOR}/include")
+    find_path(nvimgcodec_INCLUDE_DIR nvimgcodec.h PATHS "${nvimgcodec_SEARCH_PATH}")
+    if (${nvimgcodec_INCLUDE_DIR} STREQUAL "nvimgcodec_INCLUDE_DIR-NOTFOUND")
+      message(FATAL_ERROR "nvimgcodec not found in ${nvimgcodec_SEARCH_PATH} - something went wrong with the download")
+    endif()
+    message(STATUS "Using nvimgcodec_INCLUDE_DIR=${nvimgcodec_INCLUDE_DIR}")
+    include_directories(SYSTEM ${nvimgcodec_INCLUDE_DIR})
+
+    # Setting default installation path for dynamic loading
+    message(STATUS "NVIMGCODEC_DEFAULT_INSTALL_PATH=${NVIMGCODEC_DEFAULT_INSTALL_PATH}")
+    add_definitions(-DNVIMGCODEC_DEFAULT_INSTALL_PATH=\"${NVIMGCODEC_DEFAULT_INSTALL_PATH}\")
+
+    if("$ENV{ARCH}" STREQUAL "aarch64-linux")
+      message(STATUS "ARCH is set to aarch64-linux")
+      set(NVIMGCODEC_PACKAGE_NAME "nvidia-nvimgcodec-tegra-cu${CUDA_VERSION_MAJOR}")
+      set(NVJPEG2K_PACKAGE_NAME "nvidia-nvjpeg2k-tegra-cu${CUDA_VERSION_MAJOR}")
+      set(NVTIFF_PACKAGE_NAME "nvidia-nvtiff-tegra-cu${CUDA_VERSION_MAJOR}")
+      # TODO(janton): Replace with nvimgcodec[nvtiff+nvjpeg2k+...] when available
+      # TODO(janton): enable support for nvimgcodec on Tegra
+      set(DALI_INSTALL_REQUIRES_NVJPEG2K "")
+      set(DALI_INSTALL_REQUIRES_NVTIFF "")
+      set(DALI_INSTALL_REQUIRES_NVIMGCODEC "")
+    else()
+      message(STATUS "ARCH is set to $ENV{ARCH}")
+      set(NVIMGCODEC_PACKAGE_NAME "nvidia-nvimgcodec-cu${CUDA_VERSION_MAJOR}")
+      set(NVJPEG2K_PACKAGE_NAME "nvidia-nvjpeg2k-cu${CUDA_VERSION_MAJOR}")
+      set(NVTIFF_PACKAGE_NAME "nvidia-nvtiff-cu${CUDA_VERSION_MAJOR}")
+      # TODO(janton): Replace with nvimgcodec[nvtiff+nvjpeg2k+...] when available
+      set(DALI_INSTALL_REQUIRES_NVJPEG2K "\'${NVJPEG2K_PACKAGE_NAME} >= ${NVJPEG2K_MIN_VERSION}, < ${NVJPEG2K_MAX_VERSION}',")
+      message(STATUS "Adding nvjpeg2k requirement as: ${DALI_INSTALL_REQUIRES_NVJPEG2K}")
+      set(DALI_INSTALL_REQUIRES_NVTIFF "\'${NVTIFF_PACKAGE_NAME} >= ${NVTIFF_MIN_VERSION}, < ${NVTIFF_MAX_VERSION}',")
+      message(STATUS "Adding nvtiff requirement as: ${DALI_INSTALL_REQUIRES_NVTIFF}")
+      set(DALI_INSTALL_REQUIRES_NVIMGCODEC "\'${NVIMGCODEC_PACKAGE_NAME} >= ${NVIMGCODEC_MIN_VERSION}, < ${NVIMGCODEC_MAX_VERSION}',")
+      message(STATUS "Adding nvimagecodec requirement as: ${DALI_INSTALL_REQUIRES_NVIMGCODEC}")
+    endif()
+  else()
+    message(STATUS "nvImageCodec - static link")
+
+    set(NVIMGCODEC_INSTALL_PREFIX "${CMAKE_BINARY_DIR}/nvimgcodec")
+
+    set(EXTRA_CMAKE_OPTIONS $ENV{EXTRA_CMAKE_OPTIONS})
+    if (NOT "${EXTRA_CMAKE_OPTIONS}" STREQUAL "")
+      string(REPLACE " " ";" EXTRA_CMAKE_OPTIONS_LIST ${EXTRA_CMAKE_OPTIONS})
+    else()
+      set(EXTRA_CMAKE_OPTIONS_LIST "")
+    endif()
+
+    include(ExternalProject)
+    ExternalProject_Add(
+      nvImageCodec
+      GIT_REPOSITORY    https://github.com/NVIDIA/nvImageCodec.git
+      GIT_TAG           v0.4.0
+      GIT_SUBMODULES    "external/pybind11"
+                        "external/NVTX"
+                        "external/googletest"
+                        "external/dlpack"
+                        "external/boost/preprocessor"
+      CMAKE_ARGS        "-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}"
+                        "-DCMAKE_INSTALL_PREFIX=${NVIMGCODEC_INSTALL_PREFIX}"
+                        "-DBUILD_TEST=OFF"
+                        "-DBUILD_SAMPLES=OFF"
+                        "-DBUILD_PYTHON=OFF"
+                        "-DBUILD_NVJPEG2K_EXT=${BUILD_NVJPEG2K}"
+                        "-DWITH_DYNAMIC_NVJPEG2K=OFF"
+                        "-DBUILD_NVJPEG_EXT=${BUILD_NVJPEG}"
+                        "-DWITH_DYNAMIC_NVJPEG=${WITH_DYNAMIC_NVJPEG}"
+                        "-DBUILD_NVTIFF_EXT=OFF"
+                        "-DWITH_DYNAMIC_NVTIFF=OFF"
+                        "-DBUILD_NVBMP_EXT=OFF"
+                        "-DBUILD_NVPNM_EXT=OFF"
+                        "-DBUILD_LIBJPEG_TURBO_EXT=${BUILD_LIBJPEG_TURBO}"
+                        "-DBUILD_LIBTIFF_EXT=${BUILD_LIBTIFF}"
+                        "-DBUILD_OPENCV_EXT=${BUILD_OPENCV}"
+                        "-DBUILD_DOCS=OFF"
+                        "${EXTRA_CMAKE_OPTIONS_LIST}"
+      PREFIX            "${NVIMGCODEC_INSTALL_PREFIX}"
+    )
+    set(nvimgcodec_INCLUDE_DIR "${NVIMGCODEC_INSTALL_PREFIX}/include")
+    set(nvimgcodec_LIBRARY_DIR "${NVIMGCODEC_INSTALL_PREFIX}/lib64")
+    message(STATUS "Using nvimgcodec_INCLUDE_DIR=${nvimgcodec_INCLUDE_DIR}")
+    message(STATUS "Using nvimgcodec_LIBRARY_DIR=${nvimgcodec_LIBRARY_DIR}")
+    include_directories(SYSTEM ${nvimgcodec_INCLUDE_DIR})
+    link_directories(${nvimgcodec_LIBRARY_DIR})
+
+    set(NVIMGCODEC_LIBS "")
+    list(APPEND NVIMGCODEC_LIBS nvimgcodec_static)
+    list(APPEND DALI_EXCLUDES libnvimgcodec_static.a)
+
+    list(APPEND NVIMGCODEC_LIBS opencv_ext_static)
+    list(APPEND DALI_EXCLUDES libopencv_ext_static.a)
+
+    if (BUILD_LIBJPEG_TURBO)
+      message(STATUS "nvImageCodec - Include libjpeg-turbo extension")
+      list(APPEND NVIMGCODEC_LIBS jpeg_turbo_ext_static)
+      list(APPEND DALI_EXCLUDES libjpeg_turbo_ext_static.a)
+      endif()
+    if (BUILD_LIBTIFF)
+      message(STATUS "nvImageCodec - Include libtiff extension")
+      list(APPEND NVIMGCODEC_LIBS tiff_ext_static)
+      list(APPEND DALI_EXCLUDES libtiff_ext_static.a)
+      endif()
+    if (BUILD_NVJPEG2K)
+      message(STATUS "nvImageCodec - Include nvjpeg2k extension")
+      list(APPEND NVIMGCODEC_LIBS nvjpeg2k_ext_static)
+      list(APPEND DALI_EXCLUDES libnvjpeg2k_ext_static.a)
+      endif()
+    if (BUILD_NVJPEG)
+      message(STATUS "nvImageCodec - Include nvjpeg extension")
+      list(APPEND NVIMGCODEC_LIBS nvjpeg_ext_static)
+      list(APPEND DALI_EXCLUDES libnvjpeg_ext_static.a)
+      endif()
+  endif()
+endif()
+
+
+##################################################################
+# AWS SDK
+##################################################################
+if(BUILD_AWSSDK)
+  find_path(AWSSDK_INCLUDE_DIR aws/core/Aws.h)
+  find_library(AWS_CPP_SDK_CORE_LIB NAMES aws-cpp-sdk-core)
+  find_library(AWS_CPP_SDK_S3_LIB NAMES aws-cpp-sdk-s3)
+  if ("${AWSSDK_INCLUDE_DIR}" STREQUAL "AWSSDK_INCLUDE_DIR-NOTFOUND" OR
+      "${AWS_CPP_SDK_CORE_LIB}" STREQUAL "AWS_CPP_SDK_CORE_LIB-NOTFOUND" OR
+      "${AWS_CPP_SDK_S3_LIB}" STREQUAL "AWS_CPP_SDK_S3_LIB-NOTFOUND")
+      message(WARNING "AWS SDK not found. Disabling AWS SDK support.")
+      set(BUILD_AWSSDK OFF)
+  else()
+    set(AWSSDK_LIBRARIES "")
+    list(APPEND AWSSDK_LIBRARIES ${AWS_CPP_SDK_S3_LIB})
+    list(APPEND AWSSDK_LIBRARIES ${AWS_CPP_SDK_CORE_LIB})
+    message(STATUS "AWSSDK_INCLUDE_DIR=${AWSSDK_INCLUDE_DIR}")
+    message(STATUS "AWSSDK_LIBRARIES=${AWSSDK_LIBRARIES}")
+  endif()
 endif()

@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import glob
+import os
 import itertools
 import numpy as np
 import nvidia.dali.fn as fn
@@ -22,11 +23,13 @@ from nose_utils import assert_raises
 from nvidia.dali import pipeline_def
 from test_utils import get_dali_extra_path, to_array
 
-filenames = glob.glob(f"{get_dali_extra_path()}/db/video/[cv]fr/*.mp4")
+test_data_root = get_dali_extra_path()
+filenames = glob.glob(f"{test_data_root}/db/video/[cv]fr/*.mp4")
 # filter out HEVC because some GPUs do not support it
 filenames = filter(lambda filename: "hevc" not in filename, filenames)
 # mpeg4 is not yet supported in the CPU operator
 filenames = filter(lambda filename: "mpeg4" not in filename, filenames)
+filenames = filter(lambda filename: "av1" not in filename, filenames)
 files = [np.fromfile(filename, dtype=np.uint8) for filename in filenames]
 
 batch_size_values = [1, 3, 100]
@@ -91,7 +94,6 @@ def get_num_frames(encoded_video):
     decoder_pipe = video_decoder_pipeline(
         input_name=input_name, batch_size=1, device="cpu", **common_pipeline_params
     )
-    decoder_pipe.build()
     decoder_pipe.feed_input(input_name, [encoded_video])
     decoder_out = decoder_pipe.run()
     return decoder_out[0].as_array()[0].shape[0]
@@ -141,11 +143,9 @@ def test_video_input_compare_with_video_decoder(device, frames_per_sequence, bat
         **common_pipeline_params,
     )
 
-    decoder_pipe.build()
     decoder_pipe.feed_input(input_name, [test_file])
     decoder_out = decoder_pipe.run()
 
-    input_pipe.build()
     input_pipe.feed_input(input_name, np.array([[test_file]]))
 
     for ref_seq in portion_out_reference_sequence(decoder_out, frames_per_sequence, batch_size):
@@ -176,9 +176,7 @@ def test_video_input_partial_vs_pad(device, frames_per_sequence, batch_size, tes
 
     num_frames = get_num_frames(test_video)
 
-    partial_pipe.build()
     partial_pipe.feed_input(input_name, np.array([[test_video]]))
-    pad_pipe.build()
     pad_pipe.feed_input(input_name, np.array([[test_video]]))
 
     num_iterations, num_full_sequences, num_frames_in_partial_sequence = get_batch_outline(
@@ -234,7 +232,6 @@ def test_video_input_input_queue(device, n_test_files):
         **common_pipeline_params,
     )
 
-    input_pipe.build()
     for i in range(n_test_files):
         input_pipe.feed_input(input_name, np.array([[files[i]]]))
 
@@ -253,3 +250,25 @@ def test_video_input_input_queue(device, n_test_files):
         glob="No data was provided to the InputOperator. Make sure to feed it properly.",
     ):
         input_pipe.run()
+
+
+@params(*device_values)
+def test_video_input_audio_stream(device):
+    """
+    Checks if video decoding when audio stream is present
+    """
+    input_name = "VIDEO_INPUT"
+
+    input_pipe = video_input_pipeline(
+        input_name=input_name,
+        batch_size=3,
+        sequence_length=4,
+        device=device,
+        **common_pipeline_params,
+    )
+
+    filename = os.path.join(test_data_root, "db", "video", "sintel", "sintel_trailer-720p.mp4")
+    test_file = np.fromfile(filename, dtype=np.uint8)
+    input_pipe.feed_input(input_name, np.array([[test_file]]))
+
+    input_pipe.run()

@@ -1,4 +1,4 @@
-# Copyright (c) 2020-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2020-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from nose.plugins.attrib import attr
+from nose_utils import attr
 
 # it is enough to just import all functions from test_internals_operator_external_source
 # nose will query for the methods available and will run them
@@ -48,7 +48,6 @@ def test_external_source_with_iter_cupy_stream():
                 return [cp.array([attempt * 100 + i * 10 + 1.5], dtype=cp.float32)]
 
             pipe.set_outputs(fn.external_source(get_data))
-            pipe.build()
 
             for i in range(10):
                 check_output(
@@ -69,7 +68,6 @@ def test_external_source_mixed_contiguous():
     pipe = Pipeline(batch_size, 3, 0)
 
     pipe.set_outputs(fn.external_source(device="gpu", source=generator, no_copy=True))
-    pipe.build()
 
     pattern = (
         "ExternalSource operator should not mix contiguous and noncontiguous inputs. "
@@ -93,22 +91,25 @@ def _test_cross_device(src, dst, use_dali_tensor=False):
 
     iter = 0
 
-    def get_data():
-        nonlocal iter
-        with cp.cuda.Device(src):
-            data = cp.array([[1, 2, 3, 4], [5, 6, 7, 8]], dtype=cp.float32) + iter
-            iter += 1
-        if use_dali_tensor:
-            return TensorGPU(data.toDlpack())
-        return data
+    with cp.cuda.Device(src):
+        with cp.cuda.Stream(src):
 
-    with pipe:
-        pipe.set_outputs(fn.external_source(get_data, batch=False, device="gpu"))
+            def get_data():
+                nonlocal iter
+                data = cp.array([[1, 2, 3, 4], [5, 6, 7, 8]], dtype=cp.float32) + iter
+                iter += 1
+                if use_dali_tensor:
+                    return TensorGPU(data.toDlpack())
+                return data
 
-    pipe.build()
-    for i in range(10):
-        (out,) = pipe.run()
-        assert np.array_equal(np.array(out[0].as_cpu()), np.array([[1, 2, 3, 4], [5, 6, 7, 8]]) + i)
+            with pipe:
+                pipe.set_outputs(fn.external_source(get_data, batch=False, device="gpu"))
+
+            for i in range(10):
+                (out,) = pipe.run()
+                assert np.array_equal(
+                    np.array(out[0].as_cpu()), np.array([[1, 2, 3, 4], [5, 6, 7, 8]]) + i
+                )
 
 
 @attr("multigpu")
@@ -164,7 +165,6 @@ def _test_memory_consumption(device, test_case):
         return fn.external_source(source=cb(), device=device, batch=batch_mode, no_copy=no_copy)
 
     pipe = pipeline(batch_size=batch_size, num_threads=4, device_id=0)
-    pipe.build()
     for _ in range(num_iters):
         pipe.run()
 

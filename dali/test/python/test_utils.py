@@ -1,4 +1,4 @@
-# Copyright (c) 2019-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2019-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,8 +13,9 @@
 # limitations under the License.
 
 import nvidia.dali as dali
-import nvidia.dali.types as types
-from nvidia.dali.backend_impl import TensorListGPU, TensorGPU, TensorListCPU
+import nvidia.dali.types as dali_types
+from nvidia.dali.backend_impl import TensorListCPU
+from nvidia.dali import plugin_manager
 
 import functools
 import inspect
@@ -25,8 +26,11 @@ import re
 import subprocess
 import sys
 import tempfile
+from packaging.version import Version
+from nose_utils import SkipTest
 
-from distutils.version import LooseVersion
+
+is_of_supported_var = None
 
 
 def get_arch(device_id=0):
@@ -65,6 +69,24 @@ def get_device_memory_info(device_id=0):
     except ModuleNotFoundError:
         print("Python bindings for NVML not found")
         return None
+
+
+def get_gpu_name_from_nvml():
+    try:
+        nvml_output = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"]
+        )
+        return nvml_output.decode("utf-8").strip().split("\n")
+    except subprocess.CalledProcessError:
+        return None
+
+
+def skip_if_m60():
+    """Skip the test if the GPU is M60. The video decoder is not supported in full on M60."""
+
+    gpus = get_gpu_name_from_nvml()
+    if "Tesla M60" in gpus:
+        raise SkipTest()
 
 
 def get_dali_extra_path():
@@ -187,6 +209,42 @@ def get_absdiff(left, right):
     return _get_absdiff(left, right)
 
 
+def dump_as_core_artifacts(image_info, lhs, rhs, iter=None, sample_idx=None):
+    import_numpy()
+    import_pil()
+
+    from pathlib import Path
+
+    path = (
+        "/opt/dali"
+        if os.path.exists("/opt/dali") and os.access("/opt/dali", os.W_OK)
+        else os.getcwd()
+    )
+    Path(f"{path}/core_artifacts").mkdir(parents=True, exist_ok=True)
+
+    image_info = image_info.replace("/", "_")
+    image_info = image_info.replace(" ", "_")
+    if iter is not None:
+        image_info = image_info + f"_iter{iter}"
+    if sample_idx is not None:
+        image_info = image_info + f"_sample_idx{sample_idx}"
+
+    try:
+        save_image(lhs, f"{path}/core_artifacts/{image_info}.lhs.png")
+        save_image(rhs, f"{path}/core_artifacts/{image_info}.rhs.png")
+    except Exception as e:
+        print(f"Tried to save images but got an error: {e}")
+
+    try:
+        # save arrays on artifact folder
+        import numpy as np
+
+        np.save(f"{path}/core_artifacts/{image_info}.lhs.npy", lhs)
+        np.save(f"{path}/core_artifacts/{image_info}.rhs.npy", rhs)
+    except Exception as e:
+        print(f"Tried to save arrays but got an error: {e}")
+
+
 # If the `max_allowed_error` is not None, it's checked instead of comparing mean error with `eps`.
 def check_batch(
     batch1,
@@ -220,9 +278,9 @@ def check_batch(
         return False
 
     import_numpy()
-    if isinstance(batch1, dali.backend_impl.TensorListGPU):
+    if isinstance(batch1, dali.backend.TensorListGPU):
         batch1 = batch1.as_cpu()
-    if isinstance(batch2, dali.backend_impl.TensorListGPU):
+    if isinstance(batch2, dali.backend.TensorListGPU):
         batch2 = batch2.as_cpu()
 
     if batch_size is None:
@@ -292,15 +350,8 @@ def check_batch(
                     error_msg += f"\nLHS data source: {batch1[i].source_info()}"
                 if hasattr(batch2[i], "source_info"):
                     error_msg += f"\nRHS data source: {batch2[i].source_info()}"
-                try:
-                    save_image(left, "err_1.png")
-                    save_image(right, "err_2.png")
-                except:  # noqa:722
-                    print("Batch at {} can't be saved as an image".format(i))
-                    print(left)
-                    print(right)
-                np.save("err_1.npy", left)
-                np.save("err_2.npy", right)
+
+                dump_as_core_artifacts(batch1[i].source_info(), left, right, sample_idx=i)
                 assert False, error_msg
 
 
@@ -329,19 +380,11 @@ def compare_pipelines(
         compare_layouts (bool, optional): Whether to compare layouts of outputs between pipelines.
             Defaults to True.
     """
-    pipe1.build()
-    pipe2.build()
     for _ in range(N_iterations):
-        out1 = pipe1.run()
-        out2 = pipe2.run()
+        out1 = tuple(out.as_cpu() for out in pipe1.run())
+        out2 = tuple(out.as_cpu() for out in pipe2.run())
         assert len(out1) == len(out2)
-        for i in range(len(out1)):
-            out1_data = (
-                out1[i].as_cpu() if isinstance(out1[i][0], dali.backend_impl.TensorGPU) else out1[i]
-            )
-            out2_data = (
-                out2[i].as_cpu() if isinstance(out2[i][0], dali.backend_impl.TensorGPU) else out2[i]
-            )
+        for i, (out1_data, out2_data) in enumerate(zip(out1, out2)):
             if isinstance(expected_layout, tuple):
                 current_expected_layout = expected_layout[i]
             else:
@@ -389,7 +432,13 @@ class RandomDataIterator(object):
 
 class RandomlyShapedDataIterator(object):
     def __init__(
-        self, batch_size, min_shape=None, max_shape=(10, 600, 800, 3), seed=12345, dtype=None
+        self,
+        batch_size,
+        min_shape=None,
+        max_shape=(10, 600, 800, 3),
+        seed=12345,
+        dtype=None,
+        val_range=None,
     ):
         import_numpy()
         # to avoid any numpy reference in the interface
@@ -403,6 +452,7 @@ class RandomlyShapedDataIterator(object):
         self.seed = seed
         self.np_rng = np.random.default_rng(seed=seed)
         self.rng = random.Random(seed)
+        self.val_range = val_range
 
     def __iter__(self):
         self.i = 0
@@ -424,7 +474,14 @@ class RandomlyShapedDataIterator(object):
                     self.rng.randint(min_s, max_s)
                     for min_s, max_s in zip(self.min_shape, self.max_shape)
                 ]
-            if self.dtype == np.float32:
+            if self.val_range:
+                min_val = self.val_range[0]
+                max_val = self.val_range[1]
+                self.test_data.append(
+                    np.array(self.np_rng.random(shape) * (max_val - min_val), dtype=self.dtype)
+                    + min_val
+                )
+            elif self.dtype == np.float32:
                 self.test_data.append(
                     np.array(self.np_rng.random(shape) * (1.0), dtype=self.dtype) - 0.5
                 )
@@ -479,8 +536,7 @@ def check_output(outputs, ref_out, ref_is_list_of_outputs=None):
     for idx in range(len(outputs)):
         out = outputs[idx]
         ref = ref_out[idx] if ref_is_list_of_outputs else ref_out
-        if isinstance(out, dali.backend_impl.TensorListGPU):
-            out = out.as_cpu()
+        out = out.as_cpu()
         for i in range(len(out)):
             if not np.array_equal(out[i], ref[i]):
                 print("Mismatch at sample", i)
@@ -494,21 +550,21 @@ def dali_type(t):
     if t is None:
         return None
     if t is np.float16:
-        return types.FLOAT16
+        return dali_types.FLOAT16
     if t is np.float32:
-        return types.FLOAT
+        return dali_types.FLOAT
     if t is np.uint8:
-        return types.UINT8
+        return dali_types.UINT8
     if t is np.int8:
-        return types.INT8
+        return dali_types.INT8
     if t is np.uint16:
-        return types.UINT16
+        return dali_types.UINT16
     if t is np.int16:
-        return types.INT16
+        return dali_types.INT16
     if t is np.uint32:
-        return types.UINT32
+        return dali_types.UINT32
     if t is np.int32:
-        return types.INT32
+        return dali_types.INT32
     raise TypeError("Unsupported type: " + str(t))
 
 
@@ -570,18 +626,18 @@ def dali_type_to_np(type):
     import_numpy()
 
     dali_types_to_np_dict = {
-        types.BOOL: np.bool_,
-        types.INT8: np.int8,
-        types.INT16: np.int16,
-        types.INT32: np.int32,
-        types.INT64: np.int64,
-        types.UINT8: np.uint8,
-        types.UINT16: np.uint16,
-        types.UINT32: np.uint32,
-        types.UINT64: np.uint64,
-        types.FLOAT16: np.float16,
-        types.FLOAT: np.float32,
-        types.FLOAT64: np.float64,
+        dali_types.BOOL: np.bool_,
+        dali_types.INT8: np.int8,
+        dali_types.INT16: np.int16,
+        dali_types.INT32: np.int32,
+        dali_types.INT64: np.int64,
+        dali_types.UINT8: np.uint8,
+        dali_types.UINT16: np.uint16,
+        dali_types.UINT32: np.uint32,
+        dali_types.UINT64: np.uint64,
+        dali_types.FLOAT16: np.float16,
+        dali_types.FLOAT: np.float32,
+        dali_types.FLOAT64: np.float64,
     }
     return dali_types_to_np_dict[type]
 
@@ -590,18 +646,20 @@ def np_type_to_dali(type):
     import_numpy()
 
     np_types_to_dali_dict = {
-        np.bool_: types.BOOL,
-        np.int8: types.INT8,
-        np.int16: types.INT16,
-        np.int32: types.INT32,
-        np.int64: types.INT64,
-        np.uint8: types.UINT8,
-        np.uint16: types.UINT16,
-        np.uint32: types.UINT32,
-        np.uint64: types.UINT64,
-        np.float16: types.FLOAT16,
-        np.float32: types.FLOAT,
-        np.float64: types.FLOAT64,
+        np.bool_: dali_types.BOOL,
+        np.int8: dali_types.INT8,
+        np.int16: dali_types.INT16,
+        np.int32: dali_types.INT32,
+        np.int64: dali_types.INT64,
+        np.uint8: dali_types.UINT8,
+        np.uint16: dali_types.UINT16,
+        np.uint32: dali_types.UINT32,
+        np.uint64: dali_types.UINT64,
+        np.float16: dali_types.FLOAT16,
+        np.float32: dali_types.FLOAT,
+        np.float64: dali_types.FLOAT64,
+        np.longlong: dali_types.INT64,
+        np.ulonglong: dali_types.UINT64,
     }
     return np_types_to_dali_dict[type]
 
@@ -658,8 +716,7 @@ class AverageMeter(object):
 
 def to_array(dali_out):
     import_numpy()
-    if isinstance(dali_out, (TensorGPU, TensorListGPU)):
-        dali_out = dali_out.as_cpu()
+    dali_out = dali_out.as_cpu()
     if isinstance(dali_out, TensorListCPU):
         dali_out = dali_out.as_array()
     return np.array(dali_out)
@@ -794,7 +851,7 @@ def generator_random_axes_for_3d_input(
 
 def as_array(tensor):
     import_numpy()
-    return np.array(tensor.as_cpu() if isinstance(tensor, TensorGPU) else tensor)
+    return np.array(tensor.as_cpu())
 
 
 def python_function(*inputs, function, **kwargs):
@@ -874,19 +931,16 @@ def restrict_platform(min_compute_cap=None, platforms=None):
 
 def check_numba_compatibility_cpu(if_skip=True):
     import numba
-    from nose import SkipTest
 
-    # At present (as of Numba 0.57) there's a bug in LLVM JIT linker that makes the tests fail
-    # randomly on 64-bit ARM platform.
+    # There's a bug in LLVM JIT linker that makes the tests fail
+    # randomly on 64-bit ARM platform for some NUMBA versions.
     #
     # Numba bug:
     # https://github.com/numba/numba/issues/8567
-    #
-    # TODO(michalz): Update the Numba version range when there's a fix - or possibly check
-    # llvmlite directly (if still applicable)
-    if platform.processor().lower() in ("arm64", "aarch64", "armv8") and LooseVersion(
-        numba.__version__
-    ) >= LooseVersion("0.57.0"):
+    if platform.processor().lower() in ("arm64", "aarch64", "armv8") and (
+        Version(numba.__version__) >= Version("0.57.0")
+        and Version(numba.__version__) < Version("0.59.0")
+    ):
         if if_skip:
             raise SkipTest()
         else:
@@ -896,7 +950,6 @@ def check_numba_compatibility_cpu(if_skip=True):
 
 
 def check_numba_compatibility_gpu(if_skip=True):
-    from nose import SkipTest
     import nvidia.dali.plugin.numba.experimental as ex
 
     if not ex.NumbaFunction._check_minimal_numba_version(
@@ -929,3 +982,35 @@ def create_sign_off_decorator():
             return set(_tested_ops)
 
     return SignOff()
+
+
+def load_test_operator_plugin():
+    """Load plugin containing the test operators from: `dali/test/operators`."""
+    test_bin_dir = os.path.dirname(dali.__file__) + "/test"
+    try:
+        plugin_manager.load_library(test_bin_dir + "/libtestoperatorplugin.so")
+    except RuntimeError:
+        # in conda "libtestoperatorplugin" lands inside lib/ dir
+        plugin_manager.load_library("libtestoperatorplugin.so")
+
+
+def is_of_supported(device_id=0):
+    global is_of_supported_var
+    if is_of_supported_var is not None:
+        return is_of_supported_var
+
+    driver_version_major = 0
+    try:
+        import pynvml
+
+        pynvml.nvmlInit()
+        driver_version = pynvml.nvmlSystemGetDriverVersion().decode("utf-8")
+        driver_version_major = int(driver_version.split(".")[0])
+    except ModuleNotFoundError:
+        print("NVML not found")
+
+    # there is an issue with OpticalFlow driver in R495 and newer on aarch64 platform
+    is_of_supported_var = get_arch(device_id) >= 7.5 and (
+        platform.machine() == "x86_64" or driver_version_major < 495
+    )
+    return is_of_supported_var

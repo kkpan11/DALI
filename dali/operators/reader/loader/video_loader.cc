@@ -266,6 +266,14 @@ static int64_t seek_file(void *opaque, int64_t offset, int whence) {
   }
 }
 
+void clean_avformat_context(AVFormatContext **p) {
+  if (*p && (*p)->flags & AVFMT_FLAG_CUSTOM_IO) {
+    if (*p && (*p)->pb) av_freep(&(*p)->pb->buffer);
+    avio_context_free(&(*p)->pb);
+  }
+  avformat_close_input(p);
+}
+
 VideoFile& VideoLoader::get_or_open_file(const std::string &filename) {
   static VideoFile empty_file = {};
   auto& file = open_files_[filename];
@@ -299,12 +307,16 @@ VideoFile& VideoLoader::get_or_open_file(const std::string &filename) {
     // if avformat_open_input fails it frees raw_fmt_ctx so we can release it from unique_ptr
     int ret = avformat_open_input(&tmp_raw_fmt_ctx, NULL, NULL, NULL);
     if (ret < 0) {
+      // avio_ctx->ctx_ is nullified so we need to free the memory here instead of the
+      // AVFormatContext destructor which cannot access it through avio_ctx->ctx_ anymore
+      av_freep(&avio_ctx->buffer);
+      avio_context_free(&avio_ctx);
       DALI_WARN(make_string("Failed to open video file ", filename, " because of ",
                             av_err2str(ret)));
       open_files_.erase(filename);
       return empty_file;
     }
-    file.fmt_ctx_ = make_unique_av<AVFormatContext>(tmp_raw_fmt_ctx, avformat_close_input);
+    file.fmt_ctx_ = make_unique_av<AVFormatContext>(tmp_raw_fmt_ctx, clean_avformat_context);
     LOG_LINE << "File open " << filename << std::endl;
 
     LOG_LINE << "File info fetched for " << filename << std::endl;
@@ -398,6 +410,8 @@ VideoFile& VideoLoader::get_or_open_file(const std::string &filename) {
       if (pkt.stream_index == file.vid_stream_idx_) break;
       av_packet_unref(&pkt);
     }
+    auto pkt_duration = pkt.duration;
+    av_packet_unref(&pkt);
 
     if (ret < 0) {
       DALI_WARN(make_string("Unable to read frame from file :", filename));
@@ -406,10 +420,9 @@ VideoFile& VideoLoader::get_or_open_file(const std::string &filename) {
     }
 
     DALI_ENFORCE(skip_vfr_check_ ||
-      almost_equal(av_q2d(file.frame_base_), pkt.duration * av_q2d(file.stream_base_), 2),
+      almost_equal(av_q2d(file.frame_base_), pkt_duration * av_q2d(file.stream_base_), 2),
       "Variable frame rate videos are unsupported. This heuristic can yield false positives. "
       "The check can be disabled via the skip_vfr_check flag. Check failed for file: " + filename);
-    av_packet_unref(&pkt);
     // empty the read buffer from av_read_frame to save the memory usage
     avformat_flush(file.fmt_ctx_.get());
 
@@ -564,6 +577,8 @@ void VideoLoader::read_file() {
 
   bool is_first_frame = true;
   int last_key_frame = -1;
+  int previous_last_key_frame = -1;
+  bool previous_last_key_frame_updated = false;
   bool key = false;
   bool seek_must_succeed = false;
   // how many key frames following the last requested frames we saw so far
@@ -574,29 +589,37 @@ void VideoLoader::read_file() {
   int frames_send = 0;
   VidReqStatus dec_status = VidReqStatus::REQ_IN_PROGRESS;
 
-  while (av_read_frame(file.fmt_ctx_.get(), &raw_pkt) >= 0) {
-    auto pkt = pkt_ptr(&raw_pkt, av_packet_unref);
+  int read_frame_ret = 0;
+  while ((read_frame_ret = av_read_frame(file.fmt_ctx_.get(), &raw_pkt)) >= 0 ||
+          dec_status == VidReqStatus::REQ_NOT_STARTED) {
+    pkt_ptr pkt = {nullptr, av_packet_unref};
+    int64_t frame = 0;
 
-    stats_.bytes_read += pkt->size;
-    stats_.packets_read++;
+    if (read_frame_ret >= 0) {
+      pkt = pkt_ptr(&raw_pkt, av_packet_unref);
 
-    if (pkt->stream_index != file.vid_stream_idx_) {
-        continue;
+      stats_.bytes_read += pkt->size;
+      stats_.packets_read++;
+
+      if (pkt->stream_index != file.vid_stream_idx_) {
+          continue;
+      }
+
+      frame = av_rescale_q(pkt->pts - file.start_time_,
+                                file.stream_base_,
+                                file.frame_base_);
+      LOG_LINE << "Frame candidate " << frame << " (for " << req.frame  <<" )...\n";
+
+      file.last_frame_ = frame;
+      key = (pkt->flags & AV_PKT_FLAG_KEY) != 0;
     }
-
-    auto frame = av_rescale_q(pkt->pts - file.start_time_,
-                              file.stream_base_,
-                              file.frame_base_);
-    LOG_LINE << "Frame candidate " << frame << " (for " << req.frame  <<" )...\n";
-
-    file.last_frame_ = frame;
-    key = (pkt->flags & AV_PKT_FLAG_KEY) != 0;
 
     // if decoding hasn't produced any frames after providing kStartupFrameThreshold frames,
     // or we are at next key frame
     if (last_key_frame != -1 &&
         ((key && last_key_frame != frame && last_key_frame != 0) ||
-          frames_send > kStartupFrameThreshold) &&
+          frames_send > kStartupFrameThreshold ||
+          read_frame_ret < 0) &&
         dec_status == VidReqStatus::REQ_NOT_STARTED) {
         if (last_key_frame <= 0) {
           if (vid_decoder_) {
@@ -607,18 +630,36 @@ void VideoLoader::read_file() {
                     "already 0");
         }
 
+      if (previous_last_key_frame < 0) {
+        previous_last_key_frame = last_key_frame - 1;
+        previous_last_key_frame_updated = true;
+      }
+      if (previous_last_key_frame_updated == false) {
+        --previous_last_key_frame;
+      }
       LOG_LINE << "Decoding not started, seek to preceding key frame, "
-                << "current frame " << frame
-                << ", last key frame " << last_key_frame
-                << ", is_key " << key << std::endl;
-      seek(file, last_key_frame - 1);
+               << " frames_send vs kStartupFrameThreshold: "
+               << frames_send << " / " << kStartupFrameThreshold
+               << ", av_read_frame result: "
+               << read_frame_ret
+               << ", current frame " << frame
+               << ", look for a key frame before " << previous_last_key_frame
+               << ", is_key " << key << std::endl;
+      seek(file, previous_last_key_frame);
+      previous_last_key_frame_updated = false;
       frames_send = 0;
       last_key_frame = -1;
       continue;
     }
 
+    DALI_ENFORCE(pkt, "Failed to read frames.");
+
     if (key) {
       last_key_frame = frame;
+      if (frame < previous_last_key_frame) {
+        previous_last_key_frame = frame;
+        previous_last_key_frame_updated = true;
+      }
     }
 
     int pkt_frames = 1;

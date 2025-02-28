@@ -1,4 +1,4 @@
-# Copyright (c) 2019-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2019-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,7 +13,6 @@
 # limitations under the License.
 
 from nvidia.dali.pipeline import Pipeline
-from nvidia.dali.backend_impl import TensorListGPU
 import nvidia.dali.fn as fn
 import nvidia.dali.types as types
 import numpy as np
@@ -69,7 +68,7 @@ def check_normal_distribution(
                 shape_like_in = fn.external_source(
                     lambda: np.zeros(shape_gen_f()), device=device, batch=False
                 )
-                shape_out = fn.shapes(shape_like_in)
+                shape_out = shape_like_in.shape(device=device)
             else:
                 shape_arg = fn.external_source(shape_gen_f, batch=False)
                 shape_out = shape_arg
@@ -104,13 +103,9 @@ def check_normal_distribution(
             *inputs, device=device, shape=shape_arg, mean=mean_arg, stddev=stddev_arg, dtype=dtype
         )
         pipe.set_outputs(out, shape_out, mean_arg, stddev_arg)
-    pipe.build()
     for i in range(niter):
         outputs = pipe.run()
-        out, shapes, means, stddevs = tuple(
-            outputs[i].as_cpu() if isinstance(outputs[i], TensorListGPU) else outputs[i]
-            for i in range(len(outputs))
-        )
+        out, shapes, means, stddevs = tuple(outputs[i].as_cpu() for i in range(len(outputs)))
         for sample_idx in range(batch_size):
             sample = np.array(out[sample_idx])
             if sample.shape == ():

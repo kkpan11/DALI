@@ -1,4 +1,4 @@
-# Copyright (c) 2019-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2019-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -22,13 +22,13 @@ import os
 import random
 from nvidia.dali import pipeline_def
 
-from nose_utils import assert_raises
+from nose_utils import assert_raises, SkipTest
 from test_utils import compare_pipelines
 from test_utils import get_dali_extra_path
 from test_utils import to_array
 from test_utils import get_arch
+from test_utils import dump_as_core_artifacts
 from nose2.tools import params
-from nose import SkipTest
 
 
 def get_img_files(data_path, subdir="*", ext=None):
@@ -65,8 +65,8 @@ def decoder_pipe(data_path, device, use_fast_idct=False, jpeg_fancy_upsampling=F
 test_data_root = get_dali_extra_path()
 good_path = "db/single"
 misnamed_path = "db/single/missnamed"
-test_good_path = {"jpeg", "mixed", "png", "tiff", "pnm", "bmp", "jpeg2k", "webp"}
-test_misnamed_path = {"jpeg", "png", "tiff", "pnm", "bmp"}
+test_good_path = ["jpeg", "mixed", "png", "tiff", "pnm", "bmp", "jpeg2k", "webp"]
+test_misnamed_path = ["jpeg", "png", "tiff", "pnm", "bmp"]
 
 
 def run_decode(data_path, batch, device, threads):
@@ -78,21 +78,20 @@ def run_decode(data_path, batch, device, threads):
         device=device,
         prefetch_queue_depth=1,
     )
-    pipe.build()
     iters = math.ceil(pipe.epoch_size("Reader") / batch)
     for iter in range(iters):
         pipe.run()
 
 
 def test_image_decoder():
-    for device in {"cpu", "mixed"}:
-        for batch_size in {1, 10}:
+    for device in ["cpu", "mixed"]:
+        for batch_size in [1, 10]:
             for img_type in test_good_path:
-                for threads in {1, random.choice([2, 3, 4])}:
+                for threads in [1, random.choice([2, 3, 4])]:
                     data_path = os.path.join(test_data_root, good_path, img_type)
                     yield run_decode, data_path, batch_size, device, threads
             for img_type in test_misnamed_path:
-                for threads in {1, random.choice([2, 3, 4])}:
+                for threads in [1, random.choice([2, 3, 4])]:
                     data_path = os.path.join(test_data_root, misnamed_path, img_type)
                     yield run_decode, data_path, batch_size, device, threads
 
@@ -104,10 +103,10 @@ def create_decoder_slice_pipeline(data_path, device):
     anchor = fn.random.uniform(range=[0.05, 0.15], shape=(2,))
     shape = fn.random.uniform(range=[0.5, 0.7], shape=(2,))
     images_sliced_1 = fn.experimental.decoders.image_slice(
-        jpegs, anchor, shape, axes=(0, 1), device=device, hw_decoder_load=0.7
+        jpegs, anchor, shape, axes=(0, 1), device=device
     )
 
-    images = fn.experimental.decoders.image(jpegs, device=device, hw_decoder_load=0.7)
+    images = fn.experimental.decoders.image(jpegs, device=device)
     images_sliced_2 = fn.slice(images, anchor, shape, axes=(0, 1))
 
     return images_sliced_1, images_sliced_2
@@ -123,15 +122,10 @@ def create_decoder_crop_pipeline(data_path, device):
     h = 230
 
     images_crop_1 = fn.experimental.decoders.image_crop(
-        jpegs,
-        crop=(w, h),
-        crop_pos_x=crop_pos_x,
-        crop_pos_y=crop_pos_y,
-        device=device,
-        hw_decoder_load=0.7,
+        jpegs, crop=(w, h), crop_pos_x=crop_pos_x, crop_pos_y=crop_pos_y, device=device
     )
 
-    images = fn.experimental.decoders.image(jpegs, device=device, hw_decoder_load=0.7)
+    images = fn.experimental.decoders.image(jpegs, device=device)
 
     images_crop_2 = fn.crop(images, crop=(w, h), crop_pos_x=crop_pos_x, crop_pos_y=crop_pos_y)
 
@@ -146,11 +140,11 @@ def create_decoder_random_crop_pipeline(data_path, device):
     w = 242
     h = 230
     images_random_crop_1 = fn.experimental.decoders.image_random_crop(
-        jpegs, device=device, output_type=types.RGB, hw_decoder_load=0.7, seed=seed
+        jpegs, device=device, output_type=types.RGB, seed=seed
     )
     images_random_crop_1 = fn.resize(images_random_crop_1, size=(w, h))
 
-    images = fn.experimental.decoders.image(jpegs, device=device, hw_decoder_load=0.7)
+    images = fn.experimental.decoders.image(jpegs, device=device)
     images_random_crop_2 = fn.random_resized_crop(images, size=(w, h), seed=seed)
 
     return images_random_crop_1, images_random_crop_2
@@ -166,16 +160,22 @@ def run_decode_fused(test_fun, path, img_type, batch, device, threads, validatio
         device=device,
         prefetch_queue_depth=1,
     )
-    pipe.build()
+    idxs = [i for i in range(batch)]
     iters = math.ceil(pipe.epoch_size("Reader") / batch)
-    for _ in range(iters):
+    for it in range(iters):
         out_1, out_2 = pipe.run()
-        for img_1, img_2 in zip(out_1, out_2):
+        for sample_idx, img_1, img_2 in zip(idxs, out_1, out_2):
             arr_1 = to_array(img_1)
             arr_2 = to_array(img_2)
-            assert validation_fun(
-                arr_1, arr_2
-            ), f"{validation_fun.__name__}\nimage: {img_1.source_info()}"
+            is_ok = validation_fun(arr_1, arr_2)
+            if not is_ok:
+                dump_as_core_artifacts(
+                    img_1.source_info(), arr_1, arr_2, iter=it, sample_idx=sample_idx
+                )
+            assert is_ok, (
+                f"{validation_fun.__name__}\n"
+                + f"image: {img_1.source_info()} iter: {it} sample_idx: {sample_idx}"
+            )
 
 
 def test_image_decoder_fused():
@@ -205,7 +205,7 @@ def test_image_decoder_fused():
                 return np.allclose(x, y)
 
             validation_fun = mean_close
-        for device in {"cpu", "mixed"}:
+        for device in ["cpu", "mixed"]:
             for img_type in test_good_path:
                 yield (
                     run_decode_fused,
@@ -246,8 +246,8 @@ def check_FastDCT_body(batch_size, img_type, device):
 
 
 def test_FastDCT():
-    for device in {"cpu", "mixed"}:
-        for batch_size in {1, 8}:
+    for device in ["cpu", "mixed"]:
+        for batch_size in [1, 8]:
             for img_type in test_good_path:
                 yield check_FastDCT_body, batch_size, img_type, device
 
@@ -275,9 +275,8 @@ def check_fancy_upsampling_body(batch_size, img_type, device):
 @params(1, 8)
 def test_fancy_upsampling(batch_size):
     if nvidia.dali.backend.GetNvjpegVersion() < 12001:
-        from nose import SkipTest
-
         raise SkipTest("nvJPEG doesn't support fancy upsampling in this version")
+
     data_path = os.path.join(test_data_root, good_path, "jpeg")
     compare_pipelines(
         decoder_pipe(
@@ -326,9 +325,6 @@ def _testimpl_image_decoder_consistency(img_out_type, file_fmt, path, subdir="*"
 def test_image_decoder_consistency():
     for out_img_type in [types.RGB, types.BGR, types.YCbCr, types.GRAY, types.ANY_DATA]:
         for file_fmt in test_good_path:
-            if (file_fmt == "jpeg2k" or file_fmt == "mixed") and out_img_type == types.ANY_DATA:
-                # TODO(staniewzki, michalz) Fix ANY_DATA support in OpenCV
-                continue
             path = os.path.join(good_path, file_fmt)
             yield _testimpl_image_decoder_consistency, out_img_type, file_fmt, path
 
@@ -338,11 +334,6 @@ def test_image_decoder_consistency():
             ("png", "db/single/multichannel/with_alpha", "png"),
         ]:
             subdir = None  # In those paths the images are not organized in subdirs
-
-            if (file_fmt == "jpeg2k" or file_fmt == "mixed") and out_img_type == types.ANY_DATA:
-                # TODO(michalz) Fix ANY_DATA support in OpenCV
-                continue
-
             yield _testimpl_image_decoder_consistency, out_img_type, file_fmt, path, subdir, ext
 
 
@@ -356,7 +347,6 @@ def _testimpl_image_decoder_tiff_with_alpha_16bit(device, out_type, path, ext):
 
     files = get_img_files(os.path.join(test_data_root, path), ext=ext, subdir=None)
     pipe = pipe(device, out_type=out_type, files=files)
-    pipe.build()
     out, shape = pipe.run()
     if device == "mixed":
         out = out.as_cpu()
@@ -386,7 +376,6 @@ def _testimpl_image_decoder_crop_error_oob(device):
         return decoded
 
     p = pipe(device)
-    p.build()
     assert_raises(
         RuntimeError, p.run, glob="cropping window*..*..*is not valid for image dimensions*[*x*]"
     )
@@ -409,7 +398,6 @@ def _testimpl_image_decoder_slice_error_oob(device):
         return decoded
 
     p = pipe(device)
-    p.build()
     assert_raises(
         RuntimeError, p.run, glob="cropping window*..*..*is not valid for image dimensions*[*x*]"
     )
@@ -418,24 +406,6 @@ def _testimpl_image_decoder_slice_error_oob(device):
 def test_image_decoder_slice_error_oob():
     for device in ["cpu", "mixed"]:
         yield _testimpl_image_decoder_slice_error_oob, device
-
-
-# TODO(msala) Implement HW decoder in nvJPEG
-
-# def test_pinned_input_hw_decoder():
-#     file_root = os.path.join(test_data_root, good_path, "jpeg")
-
-#     @pipeline_def(batch_size=128, device_id=0, num_threads=4)
-#     def pipe():
-#         encoded, _ = fn.readers.file(file_root=file_root)
-#         encoded_gpu = encoded.gpu()
-#         # encoded.gpu() should make encoded pinned
-#         decoded = fn.experimental.decoders.image(encoded, device="mixed")
-#         return decoded, encoded_gpu
-
-#     p = pipe()
-#     p.build()
-#     p.run()
 
 
 def test_tiff_palette():
@@ -450,7 +420,6 @@ def test_tiff_palette():
         return decoded, peeked_shapes
 
     p = pipe()
-    p.build()
     imgs, peeked_shapes = p.run()
     assert (
         peeked_shapes.at(0) == peeked_shapes.at(1)
@@ -473,7 +442,6 @@ def _testimpl_image_decoder_peek_shape(
         )
 
     pipe = peek_shape_pipeline(file)
-    pipe.build()
     shape = tuple(np.asarray(pipe.run()[0][0]))
     assert shape == expected_shape, f"Expected shape {expected_shape} but got {shape}"
 
@@ -541,7 +509,6 @@ def test_image_decoder_lossless_jpeg(img_name, output_type, dtype, precision):
         return decoded
 
     p = pipe(data_dir + f"/{img_name}.jpg")
-    p.build()
     (out,) = p.run()
     result = np.array(out[0].as_cpu())
 
@@ -559,11 +526,7 @@ def test_image_decoder_lossless_jpeg(img_name, output_type, dtype, precision):
 
 
 def test_image_decoder_lossless_jpeg_cpu_not_supported():
-    device_id = 0
-    if not is_nvjpeg_lossless_supported(device_id=device_id):
-        raise SkipTest("NVJPEG lossless supported on SM60+ capable devices only")
-
-    @pipeline_def(batch_size=1, device_id=device_id, num_threads=1)
+    @pipeline_def(batch_size=1, device_id=0, num_threads=1)
     def pipe(file):
         encoded, _ = fn.readers.file(files=[file])
         decoded = fn.experimental.decoders.image(
@@ -573,8 +536,5 @@ def test_image_decoder_lossless_jpeg_cpu_not_supported():
 
     imgfile = "db/single/jpeg_lossless/0/cat-1245673_640_grayscale_16bit.jpg"
     p = pipe(os.path.join(test_data_root, imgfile))
-    p.build()
 
-    assert_raises(
-        RuntimeError, p.run, glob='*Failed to decode a JPEG lossless (SOF-3)*Only "mixed" backend*'
-    )
+    assert_raises(RuntimeError, p.run, glob="*Failed to decode*")

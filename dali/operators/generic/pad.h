@@ -23,7 +23,6 @@
 
 #include "dali/core/error_handling.h"
 #include "dali/kernels/kernel_manager.h"
-#include "dali/kernels/scratch.h"
 #include "dali/operators/util/axis_args.h"
 #include "dali/pipeline/operator/checkpointing/stateless_operator.h"
 #include "dali/pipeline/operator/operator.h"
@@ -50,10 +49,6 @@ class Pad : public StatelessOperator<Backend> {
 
   using Operator<Backend>::RunImpl;
   void RunImpl(Workspace &ws) override;
-
-  bool CanInferOutputs() const override {
-    return true;
-  }
 
  private:
   void ReadArguments(const OpSpec &spec, const Workspace &ws) {

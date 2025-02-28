@@ -1,4 +1,4 @@
-# Copyright (c) 2020-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2020-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,7 +14,6 @@
 
 import numpy as np
 import nvidia.dali as dali
-from nvidia.dali.backend_impl import TensorListGPU
 from nvidia.dali.pipeline import Pipeline
 
 
@@ -43,7 +42,7 @@ def check_coin_flip(
                     lambda: np.zeros(shape_gen_f()), device=device, batch=False
                 )
                 inputs += [shape_like_in]
-                shape_out = dali.fn.shapes(shape_like_in)
+                shape_out = shape_like_in.shape(device=device)
             else:
                 shape_arg = dali.fn.external_source(shape_gen_f, batch=False)
                 shape_out = shape_arg
@@ -51,12 +50,11 @@ def check_coin_flip(
         if shape_out is not None:
             outputs += [shape_out]
         pipe.set_outputs(*outputs)
-    pipe.build()
-    outputs = pipe.run()
-    data_out = outputs[0].as_cpu() if isinstance(outputs[0], TensorListGPU) else outputs[0]
+    outputs = tuple(out.as_cpu() for out in pipe.run())
+    data_out = outputs[0]
     shapes_out = None
     if max_shape is not None:
-        shapes_out = outputs[1].as_cpu() if isinstance(outputs[1], TensorListGPU) else outputs[1]
+        shapes_out = outputs[1]
     p = p if p is not None else 0.5
     for i in range(batch_size):
         data = np.array(data_out[i])

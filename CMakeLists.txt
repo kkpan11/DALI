@@ -1,4 +1,4 @@
-# Copyright (c) 2017-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2017-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -39,13 +39,14 @@ check_cxx_compiler_flag(-fopenmp-simd CXX_HAVE_OMP_SIMD)
 # Build options
 option(BUILD_DALI_NODEPS "Disable components that require extra external libraries to be present in the system. Effectively, it builds only the DALI core and kernel libraries")
 option(LINK_DRIVER "Links directly with libcuda.so instead of dlopen it at runtime" OFF)
-option(WITH_DYNAMIC_CUDA_TOOLKIT "Links CUDA toolkit libraires dynamically (NPP, nvJPEG, cuFFT)" OFF)
-cmake_dependent_option(WITH_DYNAMIC_NVJPEG "Dynamicly load nvJPEG" ON
-                       "WITH_DYNAMIC_CUDA_TOOLKIT" OFF)
-cmake_dependent_option(WITH_DYNAMIC_CUFFT "Dynamicly load cuFFT" ON
-                       "WITH_DYNAMIC_CUDA_TOOLKIT" OFF)
-cmake_dependent_option(WITH_DYNAMIC_NPP "Dynamicly load npp" ON
-                       "WITH_DYNAMIC_CUDA_TOOLKIT" OFF)
+option(WITH_DYNAMIC_CUDA_TOOLKIT "Links CUDA toolkit libraries dynamically (NPP, nvJPEG, cuFFT)" OFF)
+
+option(WITH_DYNAMIC_NVIMGCODEC "Links nvimgcodec library dynamically during runtime" ON)
+
+option(BUILD_WITH_ASAN "Build with ASAN" OFF)
+option(BUILD_WITH_LSAN "Build with LSAN" OFF)
+option(BUILD_WITH_UBSAN "Build with UBSAN" OFF)
+
 
 # Tests use OpenCV...
 cmake_dependent_option(BUILD_TEST "Build googletest test suite" ON
@@ -83,6 +84,12 @@ cmake_dependent_option(BUILD_LIBTAR "Build with support for libtar library" ON
 option(BUILD_FFTS "Build with ffts support" ON)  # Built from thirdparty sources
 cmake_dependent_option(BUILD_CFITSIO "Build with cfitsio support"  ON
                        "NOT BUILD_DALI_NODEPS" OFF)
+cmake_dependent_option(BUILD_NVIMAGECODEC "Build with support for nvimagecodec library" ON
+                       "NOT BUILD_DALI_NODEPS" OFF)
+cmake_dependent_option(BUILD_AWSSDK "Build with support for AWS SKD library" ON
+                       "NOT BUILD_DALI_NODEPS" OFF)
+set(NVIMGCODEC_DEFAULT_INSTALL_PATH "/opt/nvidia/nvimgcodec_cuda${CUDA_VERSION_MAJOR}" CACHE STRING
+    "Path of the nvimagecodec installation")
 
 cmake_dependent_option(BUILD_CVCUDA "Build with CV-CUDA" ON
                        "NOT STATIC_LIBS" OFF)  # Built from thirdparty sources; doesn't support static libs build
@@ -121,6 +128,13 @@ cmake_dependent_option(BUILD_NVOF "Build with NVIDIA OPTICAL FLOW SDK support" O
 cmake_dependent_option(BUILD_NVML "Build with NVIDIA Management Library (NVML) support" ON
                        "NOT BUILD_DALI_NODEPS" OFF)
 
+cmake_dependent_option(WITH_DYNAMIC_NVJPEG "Dynamicly load nvJPEG" ON
+                      "WITH_DYNAMIC_CUDA_TOOLKIT;BUILD_NVJPEG" OFF)
+cmake_dependent_option(WITH_DYNAMIC_CUFFT "Dynamicly load cuFFT" ON
+                      "WITH_DYNAMIC_CUDA_TOOLKIT" OFF)
+cmake_dependent_option(WITH_DYNAMIC_NPP "Dynamicly load npp" ON
+                      "WITH_DYNAMIC_CUDA_TOOLKIT" OFF)
+
 if((${CUDA_VERSION} VERSION_GREATER_EQUAL "12.2") OR NOT (${ARCH} MATCHES "aarch64"))
   cmake_dependent_option(BUILD_CUFILE "Build with cufile (GPU Direct Storage) support" OFF
                          "NOT BUILD_DALI_NODEPS" OFF)
@@ -151,11 +165,9 @@ set(BUILD_DALI_KERNELS ON)
 if (BUILD_DALI_KERNELS AND NOT BUILD_DALI_NODEPS)
   set(BUILD_DALI_PIPELINE ON)
   set(BUILD_DALI_OPERATORS ON)
-  set(BUILD_DALI_IMGCODEC ON)
 else()
   set(BUILD_DALI_PIPELINE OFF)
   set(BUILD_DALI_OPERATORS OFF)
-  set(BUILD_DALI_IMGCODEC OFF)
 endif()
 
 # Experimental, only enabled for BUILD_DALI_NODEPS=ON
@@ -186,7 +198,7 @@ if (NOT BUILD_PYTHON AND PYTHON_VERSIONS)
   message(WARNING "The BUILD_PYTHON option is set to off and the PYTHON_VERSIONS variable is
           provided. The latter will be ignored.")
 elseif (BUILD_PYTHON AND "${PYTHON_VERSIONS}" STREQUAL "")
-  set(PYTHON_VERSIONS "3.8;3.9;3.10;3.11;3.12")
+  set(PYTHON_VERSIONS "3.8;3.9;3.10;3.11;3.12;3.13")
 endif ()
 
 if (BUILD_PYTHON)
@@ -196,6 +208,9 @@ if (BUILD_PYTHON)
   message(STATUS "Generating python stubs using interpreter: ${PYTHON_STUBGEN_INTERPRETER}")
 endif ()
 
+cmake_dependent_option(PREBUILD_DALI_LIBS "Use prebuilt DALI libs to compile python bindings" OFF
+                       "BUILD_PYTHON" OFF)
+
 if (STATIC_LIBS)
   message (STATUS "Building static libraries")
   set(LIBTYPE STATIC)
@@ -203,6 +218,19 @@ else()
   message (STATUS "Building shared-object libraries")
   set(LIBTYPE SHARED)
 endif()
+
+
+foreach(rpath IN ITEMS
+  "$ORIGIN"
+  "$ORIGIN/../cufft/lib"
+  "$ORIGIN/../npp/lib"
+  "$ORIGIN/../nvjpeg/lib"
+  "$ORIGIN/../nvimgcodec"
+  "${NVIMGCODEC_DEFAULT_INSTALL_PATH}/lib64")
+  message(STATUS "Add to rpath: ${rpath}")
+  list(APPEND CMAKE_BUILD_RPATH ${rpath})
+  list(APPEND CMAKE_INSTALL_RPATH ${rpath})
+endforeach()
 
 get_dali_version(${PROJECT_SOURCE_DIR}/VERSION DALI_VERSION)
 
@@ -258,15 +286,20 @@ message(STATUS "Generated CMAKE_CUDA_ARCHITECTURES: ${CMAKE_CUDA_ARCHITECTURES}"
 
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --compiler-options \"-fvisibility=hidden -Wno-free-nonheap-object\" --Wno-deprecated-gpu-targets -Xfatbin -compress-all")
 
+# Suppress a few warnings from nvcc:
+# calling a __host__ function(...) from a __host__ __device__ function(...) is not allowed
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --diag-suppress=20011")
+# 'long double' is treated as 'double' in device code
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --diag-suppress=20208")
+# unrecognized #pragma in device code
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --diag-suppress=20199")
+# overloaded virtual function "dali::Operator<dali::CPUBackend>::RunImpl" is only partially overridden in class "..."
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --diag-suppress=611")
 
 # Dependencies
 if(${ARCH} MATCHES "aarch64-linux")
   message("Target set to aarch64-linux")
   include(cmake/Dependencies.aarch64-linux.cmake)
-elseif(${ARCH} MATCHES "aarch64-qnx")
-  message("Target set to aarch64-qnx")
-  include(cmake/Dependencies.aarch64-qnx.cmake)
-  set(BUILD_SHM_WRAPPER OFF)
 else()
   include(cmake/Dependencies.cmake)
 endif()
@@ -290,10 +323,13 @@ propagate_option(BUILD_FFMPEG)
 propagate_option(BUILD_NVCOMP)
 propagate_option(BUILD_NVML)
 propagate_option(BUILD_CUFILE)
+propagate_option(BUILD_NVIMAGECODEC)
+propagate_option(BUILD_AWSSDK)
 propagate_option(LINK_DRIVER)
 propagate_option(WITH_DYNAMIC_NVJPEG)
 propagate_option(WITH_DYNAMIC_CUFFT)
 propagate_option(WITH_DYNAMIC_NPP)
+propagate_option(WITH_DYNAMIC_NVIMGCODEC)
 
 # add more flags after they are populated by find_package from Dependencies.cmake
 
@@ -449,8 +485,4 @@ endif()
 
 if (BUILD_DALI_OPERATORS)
   add_library(DALI::dali_operators ALIAS dali_operators)
-endif()
-
-if (BUILD_DALI_IMGCODEC)
-  add_library(DALI::dali_imgcodec ALIAS dali_imgcodec)
 endif()
