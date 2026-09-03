@@ -1,4 +1,4 @@
-// Copyright (c) 2019-2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2019-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -47,7 +47,11 @@ Supported types: ``INT16``, ``INT32``, ``FLOAT``.)code", DALI_FLOAT)
 the highest.
 
 0 gives 3 lobes of the sinc filter, 50 gives 16 lobes, and 100 gives 64 lobes.)code",
-          50.0f, false);
+          50.0f, false)
+  .OutputNDim(0, [](const OpSpec &spec) {
+    return spec.GetArgument<bool>("downmix") ? 1 : 2;
+  })
+  .OutputLayout(0, "");
 
 
 DALI_REGISTER_OPERATOR(AudioDecoder, AudioDecoderCpu, CPU);
@@ -57,12 +61,13 @@ DALI_SCHEMA(AudioDecoder)
     .NumInput(1)
     .NumOutput(2)
     .AddParent("decoders__Audio")
-    .MakeDocPartiallyHidden()
+    .MakeDocHidden()
     .Deprecate(
+        "1.0",
         "decoders__Audio",
         R"code(In DALI 1.0 all decoders were moved into a dedicated :mod:`~nvidia.dali.fn.decoders`
 submodule and renamed to follow a common pattern. This is a placeholder operator with identical
-functionality to allow for backward compatibility.)code");  // Deprecated in 1.0;
+functionality to allow for backward compatibility.)code");
 
 bool
 AudioDecoderCpu::SetupImpl(std::vector<OutputDesc> &output_desc, const Workspace &ws) {

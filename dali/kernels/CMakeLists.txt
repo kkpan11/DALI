@@ -1,4 +1,4 @@
-# Copyright (c) 2018-2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2018-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -62,17 +62,20 @@ endif()
 # cuFFT library
 adjust_source_file_language_property("${DALI_KERNEL_SRCS}")
 set_source_files_properties("dummy.cu" PROPERTIES LANGUAGE CUDA)
+set_source_files_properties("dummy.cu" PROPERTIES COMPILE_FLAGS "")
 add_library(dali_kernels ${LIBTYPE} ${DALI_KERNEL_SRCS})
 target_link_libraries(dali_kernels PUBLIC dali_core)
 
-if (WITH_DYNAMIC_CUFFT)
-  target_link_libraries(dali_kernels PRIVATE dynlink_cufft)
-  target_link_libraries(dali_kernels PRIVATE dynlink_npp)
-  target_link_libraries(dali_kernels PRIVATE "-Wl,--exclude-libs,$<TARGET_FILE_NAME:dynlink_npp>")
-else()
-  target_link_libraries(dali_kernels PRIVATE ${CUDA_cufft_LIBRARY})
-  target_link_libraries(dali_kernels PRIVATE "-Wl,--exclude-libs,${CUDA_cufft_LIBRARY}")
-endif ()
+if (BUILD_FFTS)
+  if (WITH_DYNAMIC_CUFFT)
+    target_link_libraries(dali_kernels PRIVATE dynlink_cufft)
+    target_link_libraries(dali_kernels PRIVATE dynlink_npp)
+    target_link_libraries(dali_kernels PRIVATE "-Wl,--exclude-libs,$<TARGET_FILE_NAME:dynlink_npp>")
+  else()
+    target_link_libraries(dali_kernels PRIVATE ${CUDA_cufft_LIBRARY})
+    target_link_libraries(dali_kernels PRIVATE "-Wl,--exclude-libs,${CUDA_cufft_LIBRARY}")
+  endif ()
+endif()
 
 target_link_libraries(dali_kernels PRIVATE ${DALI_LIBS} dynlink_cuda)
 target_link_libraries(dali_kernels PRIVATE "-Wl,--exclude-libs,${exclude_libs}")
@@ -93,6 +96,9 @@ if (BUILD_TEST)
   # TODO(janton): Remove dependency with target `dali`
   target_link_libraries(dali_kernel_test PUBLIC dali_kernels dali)
   target_link_libraries(dali_kernel_test PRIVATE gtest dynlink_cuda ${DALI_LIBS})
+  if (DALI_OPENCV_TEST_EXTRA_LIBS)
+    target_link_libraries(dali_kernel_test PRIVATE ${DALI_OPENCV_TEST_EXTRA_LIBS})
+  endif()
   target_link_libraries(dali_kernel_test PRIVATE "-Wl,--exclude-libs,${exclude_libs}")
   if (WITH_DYNAMIC_NPP)
     target_link_libraries(dali_kernel_test PRIVATE dynlink_npp)

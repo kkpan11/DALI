@@ -1,4 +1,4 @@
-// Copyright (c) 2019-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2019-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -45,7 +45,7 @@ TEST(ArithmeticOpsTest, TreePropagation) {
   ws.AddInput(in[0]);
   ws.AddInput(in[1]);
 
-  auto result_type = PropagateTypes<CPUBackend>(expr_ref, ws);
+  auto result_type = PropagateTypes(expr_ref, ws);
   TensorListShape<> result_shape;
   PropagateShapes<CPUBackend>(result_shape, expr_ref, ws, 2);
   auto result_layout = GetCommonLayout<CPUBackend>(expr_ref, ws);
@@ -248,7 +248,7 @@ class BinaryArithmeticOpsTest
     pipe.AddExternalInput("data0");
     pipe.AddExternalInput("data1");
 
-    pipe.AddOperator(OpSpec("ArithmeticGenericOp")
+    pipe.AddOperator(OpSpec("_ArithmeticGenericOp")
                          .AddArg("device", backend)
                          .AddArg("expression_desc", expression_desc)
                          .AddInput("data0", storage_device)
@@ -306,7 +306,7 @@ class BinaryArithmeticOpsTest
     pipe.AddExternalInput("data0");
     pipe.AddExternalInput("data1");
 
-    pipe.AddOperator(OpSpec("ArithmeticGenericOp")
+    pipe.AddOperator(OpSpec("_ArithmeticGenericOp")
                          .AddArg("device", backend)
                          .AddArg("expression_desc", "add(&0 &1)")
                          .AddInput("data0", storage_device)
@@ -364,16 +364,22 @@ class BinaryArithmeticOpsTest
 };
 
 template <typename T>
+constexpr T ref_mod(T l, T r) {
+  if constexpr (std::is_integral<T>::value) {
+    return l % r;
+  } else {
+    return std::fmod(l, r);
+  }
+}
+
+template <typename T>
 std::vector<std::tuple<std::string, bin_op_pointer<T>>> getOpNameRef() {
   return std::vector<std::tuple<std::string, bin_op_pointer<T>>>{
       std::make_tuple("add", [](T l, T r) -> T { return l + r; }),
       std::make_tuple("sub", [](T l, T r) -> T { return l - r; }),
       std::make_tuple("mul", [](T l, T r) -> T { return l * r; }),
       std::make_tuple("div", [](T l, T r) -> T { return l / r; }),
-      std::make_tuple("mod",
-                      std::is_integral<T>::value
-                      ? [](T l, T r) -> T { return std::fmod(l, r); }
-                      : [](T l, T r) -> T { return std::remainder(l, r); }),
+      std::make_tuple("mod", ref_mod<T>)
   };
 }
 
@@ -420,7 +426,7 @@ TEST(ArithmeticOpsTest, GenericPipeline) {
   pipe.AddExternalInput("data0");
   pipe.AddExternalInput("data1");
 
-  pipe.AddOperator(OpSpec("ArithmeticGenericOp")
+  pipe.AddOperator(OpSpec("_ArithmeticGenericOp")
                        .AddArg("device", "cpu")
                        .AddArg("expression_desc", "add(&0 &1)")
                        .AddInput("data0", StorageDevice::CPU)
@@ -428,7 +434,7 @@ TEST(ArithmeticOpsTest, GenericPipeline) {
                        .AddOutput("result", StorageDevice::CPU),
                    "arithm_cpu");
 
-  pipe.AddOperator(OpSpec("ArithmeticGenericOp")
+  pipe.AddOperator(OpSpec("_ArithmeticGenericOp")
                        .AddArg("device", "gpu")
                        .AddArg("expression_desc", "mul(&0 &1)")
                        .AddInput("result", StorageDevice::GPU)
@@ -474,7 +480,7 @@ TEST(ArithmeticOpsTest, FdivPipeline) {
   pipe.AddExternalInput("data0");
   pipe.AddExternalInput("data1");
 
-  pipe.AddOperator(OpSpec("ArithmeticGenericOp")
+  pipe.AddOperator(OpSpec("_ArithmeticGenericOp")
                        .AddArg("device", "cpu")
                        .AddArg("expression_desc", "fdiv(&0 &1)")
                        .AddInput("data0", StorageDevice::CPU)
@@ -482,7 +488,7 @@ TEST(ArithmeticOpsTest, FdivPipeline) {
                        .AddOutput("result0", StorageDevice::CPU),
                    "arithm_cpu");
 
-  pipe.AddOperator(OpSpec("ArithmeticGenericOp")
+  pipe.AddOperator(OpSpec("_ArithmeticGenericOp")
                        .AddArg("device", "gpu")
                        .AddArg("expression_desc", "fdiv(&0 &1)")
                        .AddInput("data0", StorageDevice::GPU)
@@ -544,7 +550,7 @@ TEST(ArithmeticOpsTest, ConstantsPipeline) {
 
   pipe.AddExternalInput("data0");
 
-  pipe.AddOperator(OpSpec("ArithmeticGenericOp")
+  pipe.AddOperator(OpSpec("_ArithmeticGenericOp")
                        .AddArg("device", "cpu")
                        .AddArg("expression_desc", "add(&0 $0:int32)")
                        .AddArg("integer_constants", std::vector<int>{magic_int})
@@ -552,7 +558,7 @@ TEST(ArithmeticOpsTest, ConstantsPipeline) {
                        .AddOutput("result0", StorageDevice::CPU),
                    "arithm_cpu_add");
 
-  pipe.AddOperator(OpSpec("ArithmeticGenericOp")
+  pipe.AddOperator(OpSpec("_ArithmeticGenericOp")
                        .AddArg("device", "cpu")
                        .AddArg("expression_desc", "mul(&0 $0:float32)")
                        .AddArg("real_constants", std::vector<float>{magic_float})
@@ -601,7 +607,7 @@ class ArithmeticOpsScalarTest :  public ::testing::TestWithParam<shape_sequence>
     pipe.AddExternalInput("data0");
     pipe.AddExternalInput("data1");
 
-    pipe.AddOperator(OpSpec("ArithmeticGenericOp")
+    pipe.AddOperator(OpSpec("_ArithmeticGenericOp")
                         .AddArg("device", "cpu")
                         .AddArg("expression_desc", "add(&0 &1)")
                         .AddInput("data0", StorageDevice::CPU)
@@ -609,7 +615,7 @@ class ArithmeticOpsScalarTest :  public ::testing::TestWithParam<shape_sequence>
                         .AddOutput("result0", StorageDevice::CPU),
                     "arithm_cpu");
 
-    pipe.AddOperator(OpSpec("ArithmeticGenericOp")
+    pipe.AddOperator(OpSpec("_ArithmeticGenericOp")
                         .AddArg("device", "gpu")
                         .AddArg("expression_desc", "add(&0 &1)")
                         .AddInput("data0", StorageDevice::GPU)
@@ -746,14 +752,14 @@ TEST(ArithmeticOpsTest, UnaryPipeline) {
 
   pipe.AddExternalInput("data0");
 
-  pipe.AddOperator(OpSpec("ArithmeticGenericOp")
+  pipe.AddOperator(OpSpec("_ArithmeticGenericOp")
                        .AddArg("device", "cpu")
                        .AddArg("expression_desc", "minus(&0)")
                        .AddInput("data0", StorageDevice::CPU)
                        .AddOutput("result0", StorageDevice::CPU),
                    "arithm_cpu_neg");
 
-  pipe.AddOperator(OpSpec("ArithmeticGenericOp")
+  pipe.AddOperator(OpSpec("_ArithmeticGenericOp")
                        .AddArg("device", "gpu")
                        .AddArg("expression_desc", "plus(&0)")
                        .AddInput("result0", StorageDevice::GPU)

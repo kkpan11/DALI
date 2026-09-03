@@ -1,4 +1,4 @@
-// Copyright (c) 2017-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2017-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -25,7 +25,6 @@
 #include "dali/core/geom/box.h"
 #include "dali/core/static_switch.h"
 #include "dali/pipeline/data/views.h"
-#include "dali/pipeline/util/batch_rng.h"
 #include "dali/pipeline/util/bounding_box_utils.h"
 
 namespace dali {
@@ -195,6 +194,7 @@ associated with each of the bounding boxes.)code")
              spec.GetArgument<bool>("output_bbox_indices");  // +1 if output_bbox_indices=True
     })
     .AddRandomSeedArg()
+    .AddRandomStateArg()
     .AddOptionalArg(
         "thresholds",
         R"code(Minimum IoU or a different metric, if specified by `threshold_type`, of the
@@ -303,7 +303,7 @@ be valid.)code",
         R"code(If set to True, one of the possible outcomes of the random process will
 be to not crop, as if the outcome was one more `thresholds` value from which to choose.)code",
         true)
-    .AddOptionalArg<int>(
+    .AddOptionalArg<std::vector<int>>(
         "crop_shape",
         R"code(If provided, the random crop window dimensions will be fixed to this shape.
 
@@ -312,14 +312,14 @@ The order of dimensions is determined by the layout provided in `shape_layout`.
 .. note::
   When providing `crop_shape`, `input_shape` should be provided as well. Providing explicit `crop_shape` is
   incompatible with using `scaling` and `aspect_ratio` arguments.)code",
-        std::vector<int>{}, true)
-    .AddOptionalArg<int>(
+        nullptr, true)
+    .AddOptionalArg<std::vector<int>>(
         "input_shape",
         R"code(Specifies the shape of the original input image.
 
 The order of dimensions is determined by the layout that is provided in `shape_layout`.
 )code",
-        std::vector<int>{}, true)
+        nullptr, true)
     .AddOptionalArg<TensorLayout>(
         "bbox_layout",
         R"code(Determines the meaning of the coordinates of the bounding boxes.
@@ -331,10 +331,10 @@ The value of this argument is a string containing the following characters::
   W (width),                   H (height),                D (depth).
 
 .. note::
-  If this value is left empty, depending on the number of dimensions, "xyXY" or
+  If this value is not specified, depending on the number of dimensions, "xyXY" or
   "xyzXYZ" is assumed.
 )code",
-        TensorLayout{})
+        nullptr)
     .AddOptionalArg<TensorLayout>(
         "shape_layout",
         R"code(Determines the meaning of the dimensions provided in `crop_shape` and
@@ -347,9 +347,9 @@ The values are:
 - ``D`` (depth)
 
 .. note::
-  If left empty, depending on the number of dimensions ``"WH"`` or ``"WHD"`` will be assumed.
+  If left unset, depending on the number of dimensions ``"WH"`` or ``"WHD"`` will be assumed.
 )code",
-        TensorLayout{})
+        nullptr)
     .AddOptionalArg<bool>(
         "output_bbox_indices",
         R"code(If set to True, an extra output will be returned, containing
@@ -364,7 +364,30 @@ if the fraction of their area within the ROI is greater than or equal to the thr
 For example, when `bbox_prune_threshold=0.2` bboxes that have at least 20% of their original area within
 the ROI are kept, bboxes less than or equal to are pruned. If `bbox_prune_threshold=0.0`, all boxes that
 have some presence in the ROI are kept.)code",
-        nullptr);
+        nullptr)
+    .AddOptionalArg(
+        "quiet",
+        R"code(If set to True, suppresses the warning that is emitted when a valid cropping window
+could not be found within the allowed number of attempts and the best candidate is used instead.
+
+This is useful when the failure to find a valid crop is an expected and acceptable outcome
+(for example, in mosaic augmentation pipelines).)code",
+        false)
+    .OutputNDim(0, 1)
+    .OutputNDim(1, 1)
+    .OutputNDim(2, 2)
+    .OutputNDim(3, std::nullopt)
+    .OutputNDim(4, std::nullopt)
+    .OutputDType(0, DALI_FLOAT)
+    .OutputDType(1, DALI_FLOAT)
+    .OutputDType(2, DALI_FLOAT)
+    .OutputDType(3, DALI_INT32)
+    .OutputDType(4, DALI_INT32)
+    .OutputLayout(0, "")
+    .OutputLayout(1, "")
+    .OutputLayout(2, "")
+    .OutputLayout(3, "")
+    .OutputLayout(4, "");
 
 template <int ndim>
 class RandomBBoxCropImpl : public OpImplBase<CPUBackend> {
@@ -386,18 +409,22 @@ class RandomBBoxCropImpl : public OpImplBase<CPUBackend> {
   /**
    * @param spec  Pointer to a persistent OpSpec object,
    *              which is guaranteed to be alive for the entire lifetime of this object
+   * @param rng_op  Pointer to the (base class) of the enclosing operator, needed for
+   *                accessing the random number generator infrastructure.
    */
-  RandomBBoxCropImpl(const OpSpec *spec, BatchRNG<std::mt19937_64> &rng)
+  RandomBBoxCropImpl(const OpSpec *spec, rng::OperatorWithRng<Operator<CPUBackend>> *rng_op)
       : spec_(*spec),
+        rng_op_(rng_op),
         num_attempts_{spec_.GetArgument<int>("num_attempts")},
         has_labels_(spec_.NumRegularInput() > 1),
         has_crop_shape_(spec_.ArgumentDefined("crop_shape")),
         has_input_shape_(spec_.ArgumentDefined("input_shape")),
-        bbox_layout_(spec_.GetArgument<TensorLayout>("bbox_layout")),
-        shape_layout_(spec_.GetArgument<TensorLayout>("shape_layout")),
         all_boxes_above_threshold_(spec_.GetArgument<bool>("all_boxes_above_threshold")),
         output_bbox_indices_(spec_.GetArgument<bool>("output_bbox_indices")),
-        rngs_(rng) {
+        quiet_(spec_.GetArgument<bool>("quiet")) {
+    has_bbox_layout_ = spec_.TryGetArgument(bbox_layout_, "bbox_layout");
+    has_shape_layout_ = spec_.TryGetArgument(shape_layout_, "shape_layout");
+
     auto scaling_arg = spec_.GetRepeatedArgument<float>("scaling");
     DALI_ENFORCE(scaling_arg.size() == 2,
                  make_string("`scaling` must be a range `[min, max]`. Got ",
@@ -502,7 +529,7 @@ class RandomBBoxCropImpl : public OpImplBase<CPUBackend> {
 
     auto default_bbox_layout_start_end = DefaultBBoxLayout<ndim>();
     auto default_bbox_layout_start_shape = DefaultBBoxAnchorAndShapeLayout<ndim>();
-    if (bbox_layout_.empty()) {
+    if (!has_bbox_layout_) {
       auto ltrb = spec_.GetArgument<bool>("ltrb");
       bbox_layout_ = ltrb ? default_bbox_layout_start_end : default_bbox_layout_start_shape;
     }
@@ -516,8 +543,8 @@ class RandomBBoxCropImpl : public OpImplBase<CPUBackend> {
     if (has_input_shape_ || has_crop_shape_) {
       // Converting the shapes to "WHD" or "WH" if necessary
       auto default_shape_layout = InternalShapeLayout(ndim);
-      const TensorLayout &layout = shape_layout_.empty() ? default_shape_layout : shape_layout_;
-      if (!shape_layout_.empty() && shape_layout_ != default_shape_layout) {
+      const TensorLayout &layout = has_shape_layout_ ? shape_layout_ : default_shape_layout;
+      if (layout != default_shape_layout) {
         DALI_ENFORCE(shape_layout_.is_permutation_of(default_shape_layout),
                      make_string("`shape_layout` should be a permutation of ", default_shape_layout,
                                  "` for the provided inputs"));
@@ -653,7 +680,8 @@ class RandomBBoxCropImpl : public OpImplBase<CPUBackend> {
    * @remarks The dimensions are fixed on a random order
    * @return true if the shape was modified, false otherwise
    */
-  bool FixAspectRatios(vec<ndim>& shape) {
+  template <typename RNG>
+  bool FixAspectRatios(vec<ndim>& shape, RNG rng) {
     // If aspect ratio is fixed, fix the required dimensions
     std::array<float, ndim*ndim> fixed_aspect_ratios;
     int k = 0;
@@ -679,9 +707,7 @@ class RandomBBoxCropImpl : public OpImplBase<CPUBackend> {
 
     std::array<int, ndim> order;
     std::iota(order.begin(), order.end(), 0);
-    std::random_device rd;
-    std::mt19937 g(rd());
-    std::shuffle(order.begin(), order.end(), g);
+    std::shuffle(order.begin(), order.end(), rng);
 
     float max_extent = 0.0f;
     for (int d = 0; d < ndim; d++) {
@@ -715,8 +741,8 @@ class RandomBBoxCropImpl : public OpImplBase<CPUBackend> {
     float best_metric = -1.0;
 
     crop.clear();
+    auto rng = rng_op_->GetSampleRNG(sample);
     while (!crop.success && (total_num_attempts_ < 0 || count < total_num_attempts_)) {
-      auto &rng = rngs_[sample];
       std::uniform_int_distribution<> idx_dist(0, sample_options_.size() - 1);
       SampleOption option = sample_options_[idx_dist(rng)];
       bool absolute_crop_dims = has_crop_shape_;
@@ -775,7 +801,7 @@ class RandomBBoxCropImpl : public OpImplBase<CPUBackend> {
           // Otherwise, we use the relative shape for aspect ratio check
           vec<ndim> tmp_sh = has_input_shape_ ? shape * input_shape_[sample] : shape;
 
-          bool fixed_ar = FixAspectRatios(tmp_sh);
+          bool fixed_ar = FixAspectRatios(tmp_sh, rng);
 
           if (!ValidAspectRatio(tmp_sh))
             continue;
@@ -791,6 +817,13 @@ class RandomBBoxCropImpl : public OpImplBase<CPUBackend> {
             rel_crop.hi[d] = anchor[d] + shape[d];
           }
           out_crop = rel_crop;
+        }
+
+        if (bounding_boxes.empty()) {
+          // No bounding boxes to consider, just use the first propsed crop
+          crop.crop = out_crop;
+          crop.success = true;
+          continue;
         }
 
         float min_overlap = 0.0, max_overlap = 0.0;
@@ -828,9 +861,11 @@ class RandomBBoxCropImpl : public OpImplBase<CPUBackend> {
     }
 
     if (!crop.success) {
-      DALI_WARN(make_string(
-        "Could not find a valid cropping window to satisfy the specified requirements (attempted ",
-        count, " times). Using the best cropping window so far (best_metric=", best_metric, ")"));
+      if (!quiet_)
+        DALI_WARN(make_string(
+          "Could not find a valid cropping window to satisfy the specified requirements "
+          "(attempted ", count, " times). Using the best cropping window so far "
+          "(best_metric=", best_metric, ")"));
       crop.success = true;
     }
   }
@@ -902,11 +937,14 @@ class RandomBBoxCropImpl : public OpImplBase<CPUBackend> {
 
  private:
   const OpSpec &spec_;
+  rng::OperatorWithRng<Operator<CPUBackend>> *rng_op_;
   int num_attempts_;
   int total_num_attempts_;
   bool has_labels_;
   bool has_crop_shape_;
   bool has_input_shape_;
+  bool has_bbox_layout_;
+  bool has_shape_layout_;
 
   TensorLayout bbox_layout_;
   TensorLayout shape_layout_;
@@ -915,9 +953,8 @@ class RandomBBoxCropImpl : public OpImplBase<CPUBackend> {
   BoxPruneMethod box_prune_method_ = BoxPruneMethod::Centroid;
   bool all_boxes_above_threshold_ = true;
   bool output_bbox_indices_ = false;
+  bool quiet_ = false;
   float bbox_prune_threshold_ = 0.0f;
-
-  BatchRNG<std::mt19937_64> &rngs_;
 
   std::vector<SampleOption> sample_options_;
 
@@ -940,7 +977,7 @@ RandomBBoxCrop<CPUBackend>::~RandomBBoxCrop() = default;
 
 template <>
 RandomBBoxCrop<CPUBackend>::RandomBBoxCrop(const OpSpec &spec)
-    : OperatorWithRng<CPUBackend>(spec) {}
+    : OperatorWithRng<Operator<CPUBackend>>(spec) {}
 
 template <>
 bool RandomBBoxCrop<CPUBackend>::SetupImpl(std::vector<OutputDesc> &output_desc,
@@ -966,7 +1003,7 @@ bool RandomBBoxCrop<CPUBackend>::SetupImpl(std::vector<OutputDesc> &output_desc,
 
   if (impl_ == nullptr || impl_ndim_ != num_dims) {
     VALUE_SWITCH(num_dims, ndim, (2, 3),
-      (impl_ = std::make_unique<RandomBBoxCropImpl<ndim>>(&spec_, rng_);),
+      (impl_ = std::make_unique<RandomBBoxCropImpl<ndim>>(&spec_, this);),
       (DALI_FAIL(make_string("Not supported number of dimensions", num_dims));));
     impl_ndim_ = num_dims;
   }

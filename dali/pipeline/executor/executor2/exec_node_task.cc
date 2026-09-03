@@ -32,6 +32,12 @@ namespace exec2 {
 //////////////////////////////////////////////////////////////////////////////////
 // OpTask
 
+ExecNodeTask::~ExecNodeTask() {
+  DomainTimeRange r("[Exec] ~ExecNodeTask", RangeBase::kMagenta);
+  ws_params_ = {};
+  event_.reset();
+}
+
 class OpTask : public ExecNodeTask {
  public:
   /** Gets a functor that runs the operator. */
@@ -307,14 +313,21 @@ void OpTask::RunOp() {
   if (!skip_) {
     DomainTimeRange tr(meta_->nvtx.run_range_name, meta_->nvtx.range_color);
     node_->op->Run(*ws_);
-    ResetInputLayouts();
-    PropagateSourceInfo(*ws_);
+    {
+      DomainTimeRange r("[Exec] ResetInputLayouts", RangeBase::kMagenta);
+      ResetInputLayouts();
+    }
+    {
+      DomainTimeRange r("[Exec] PropagateSourceInfo", RangeBase::kMagenta);
+      PropagateSourceInfo(*ws_);
+    }
   }
   assert(ws_->GetIterationData());
   if (auto cpt = ws_->GetIterationData()->checkpoint) {
     node_->op->SaveState(cpt->GetOpCheckpoint(node_->instance_name), ws_->output_order());
   }
   if (ws_->has_stream()) {
+    DomainTimeRange r("[Exec] Post-run set events", RangeBase::kMagenta);
     assert(ws_->has_event());
     assert(event_ == ws_->event());
     for (int o = 0; o < ws_->NumOutput(); o++) {
@@ -562,6 +575,9 @@ tasking::SharedTask ExecNodeTask::CreateTask(ExecNode *node, const WorkspacePara
       OutputTask(node, params).GetRunnable());
   } else {
     int nout = node->outputs.size();
+    // the size of outputs is limited by the compile-time operator schema
+    // that uses int to represent the number of outputs
+    assert(nout >= 0 && static_cast<size_t>(nout) == node->outputs.size());
     return tasking::Task::Create(
       nout,
       OpTask(node, params).GetRunnable());
@@ -569,6 +585,7 @@ tasking::SharedTask ExecNodeTask::CreateTask(ExecNode *node, const WorkspacePara
 }
 
 void ClearWorkspacePayload(Workspace &ws, ExecNode &node) {
+  DomainTimeRange r("[Exec] ClearWokspacePayload", RangeBase::kMagenta);
   auto event = ws.has_event() ? ws.event() : nullptr;
   for (int i = 0; i < ws.NumInput(); i++) {
     // TODO(michalz): Some smarter deletion management

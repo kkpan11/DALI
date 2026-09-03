@@ -1,4 +1,4 @@
-// Copyright (c) 2019-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2019-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -73,6 +73,7 @@ template <typename Backend>
 class DLL_PUBLIC TensorList {
  public:
   TensorList();
+  ~TensorList();
 
   /**
    * @brief This constructor allows to create a TensorList with `batch_size` samples.
@@ -83,8 +84,19 @@ class DLL_PUBLIC TensorList {
   TensorList(const TensorList &) = delete;
   TensorList &operator=(const TensorList &) = delete;
 
+  /**
+   * @brief Repeats the `sample` `num_samples` times.
+   *
+   * The TensorList is created in non-contiguous mode.
+   * The TensorList is created with the same type, layout, pinned status, device_id as the sample.
+   *
+   * @param sample The sample to repeat.
+   * @param num_samples The number of times to repeat the sample.
+   */
+  TensorList(const Tensor<Backend> &sample, int num_samples);
+
   TensorList<Backend> &operator=(TensorList<Backend> &&other) noexcept;
-  DLL_PUBLIC TensorList<Backend>(TensorList<Backend> &&other) noexcept;
+  DLL_PUBLIC TensorList(TensorList<Backend> &&other) noexcept;
 
 
   AccessOrder order() const {
@@ -394,6 +406,23 @@ class DLL_PUBLIC TensorList {
    * @param new_shape requested shape
    */
   DLL_PUBLIC void ResizeSample(int sample_idx, const TensorShape<> &new_shape);
+
+  /**
+   * @brief Reinterprets the contents of the tensor as having a different type.
+   *
+   * Changes the element type of the tensor. The size of the element must not change.
+   */
+  void Reinterpret(DALIDataType new_type_id) {
+    Reinterpret(TypeTable::GetTypeInfo(new_type_id));
+  }
+
+  void Reinterpret(const TypeInfo &new_type_info) {
+    DALI_ENFORCE(new_type_info.size() == type_.size(),
+      "Cannot reinterpret the tensor as having a different element size.");
+    type_ = new_type_info;
+    for (int t = 0, n = num_samples(); t < n; t++)
+      tensors_[t].type_ = new_type_info;  // just assign, no need to re-validate the size
+  }
 
   /**
    * @brief Reserve memory as one contiguous allocation

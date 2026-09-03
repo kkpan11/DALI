@@ -1,4 +1,4 @@
-# Copyright (c) 2017-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2017-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -29,12 +29,13 @@ import atexit
 import copy
 import functools
 import inspect
-import pickle  # nosec B403
+import json
 import sys
 import traceback
 import warnings
 import weakref
 from .data_node import DataNode
+from enum import Enum
 
 pipeline_tls = tls()
 
@@ -42,9 +43,9 @@ DataNode.__module__ = __name__  # move to pipeline
 
 
 def _show_deprecation_warning(deprecated, in_favor_of):
-    # show only this warning
+    # show by default, but honor warning filters configured by the user
     with warnings.catch_warnings():
-        warnings.simplefilter("default")
+        warnings.simplefilter("default", append=True)
         warnings.warn(
             "{} is deprecated, please use {} instead".format(deprecated, in_favor_of),
             Warning,
@@ -54,6 +55,43 @@ def _show_deprecation_warning(deprecated, in_favor_of):
 
 def _show_warning(message):
     warnings.warn(message, Warning, stacklevel=2)
+
+
+class StreamPolicy(Enum):
+    """Stream policy for the pipeline.
+
+    SINGLE:
+        All operators will share a single stream.
+    PER_BACKEND:
+        Each backend will have its own stream.
+    PER_OPERATOR:
+        The operators that can run in parallel will have distinct streams.
+        The number of streams is kept at minimum required for independent scheduling - for example
+        strictly sequential pipelines will have only one stream.
+    """
+
+    SINGLE = b._ExecutorFlags.StreamPolicySingle
+    PER_BACKEND = b._ExecutorFlags.StreamPolicyPerBackend
+    PER_OPERATOR = b._ExecutorFlags.StreamPolicyPerOperator
+    UNSPECIFIED = b._ExecutorFlags.NoFlags
+
+
+class OperatorConcurrency(Enum):
+    """Operator concurrency policy for the pipeline.
+
+    NONE:
+        No concurrency.
+    BACKEND:
+        Independent operators with different backends (cpu, gpu, mixed) will run in parallel.
+    FULL:
+        All independent operators will run in parallel.
+        NOTE: Due to internal limitations, CPU operators cannot run in paralle with each other.
+    """
+
+    NONE = b._ExecutorFlags.ConcurrencyNone
+    BACKEND = b._ExecutorFlags.ConcurrencyBackend
+    FULL = b._ExecutorFlags.ConcurrencyFull
+    UNSPECIFIED = b._ExecutorFlags.NoFlags
 
 
 class Pipeline(object):
@@ -107,13 +145,20 @@ class Pipeline(object):
         run asynchronously with respect to the calling Python thread.
         In order to synchronize with the pipeline one needs to call
         :meth:`outputs` method.
-    exec_dynamic : bool, optional, default = False
-        Whether to use the dynamic executor.
-        Dynamic executor allows to interleave CPU and GPU operators and to perform GPU to CPU
+    exec_dynamic : bool, optional, default = None
+        ``exec_dynamic`` marks the default execution model.
+        This execution model allows to interleave CPU and GPU operators and to perform GPU to CPU
         copies. It also uses dynamic memory allocation for pipeline outputs and inter-operator
         buffers, which reduces memory consumption in complex pipelines.
-        When `exec_dynamic` is ``True``, `exec_async` and `exec_pipelined` must be left at
-        their default (``True``) values.
+        This execution model is used by default when ``exec_async`` and ``exec_pipelined`` are
+        ``True`` and separated queues are not used (see ``prefetch_queue_depth``). It can be
+        forcibly disabled by specifying ``exec_dynamic=False``.
+    stream_policy : StreamPolicy, optional, default = None
+        Stream policy (only for the default execution model).
+        If not specified, the default value is ``StreamPolicy.PER_BACKEND``.
+    concurrency : OperatorConcurrency, optional, default = None
+        Operator concurrency policy (only for the default execution model).
+        If not specified, the default value is ``OperatorConcurrency.BACKEND``.
     bytes_per_sample : int, optional, default = 0
         A hint for DALI for how much memory to use for its tensors.
     set_affinity : bool, optional, default = False
@@ -238,8 +283,10 @@ class Pipeline(object):
         output_dtype=None,
         output_ndim=None,
         output_layout=None,
-        exec_dynamic=False,
+        exec_dynamic=None,
         experimental_exec_dynamic=None,
+        stream_policy=None,
+        concurrency=None,
     ):
         if experimental_exec_dynamic is not None:
             _show_deprecation_warning("experimental_exec_dynamic", "exec_dynamic")
@@ -284,6 +331,8 @@ class Pipeline(object):
         self._exec_dynamic = exec_dynamic
         self._bytes_per_sample = bytes_per_sample
         self._set_affinity = set_affinity
+        self._stream_policy = stream_policy
+        self._concurrency = concurrency
         self._py_num_workers = py_num_workers
         self._py_start_method = py_start_method
         if py_callback_pickler is not None and py_start_method == "fork":
@@ -297,6 +346,7 @@ class Pipeline(object):
         self._skip_api_check = False
         self._graph_out = None
         self._ops = None
+        self._transfer_ops = {}
         self._graph_outputs = None
         self._py_pool = None
         self._input_callbacks = None
@@ -327,6 +377,9 @@ class Pipeline(object):
         # Tracking the stack frame where pipeline definition starts
         self._definition_frame_start = 0
 
+        if exec_dynamic is None and exec_pipelined and exec_async and not self._exec_separated:
+            self._exec_dynamic = exec_dynamic = True
+
         self._executor_type = b._MakeExecutorType(
             self._exec_pipelined, self._exec_async, self._exec_separated, self._exec_dynamic
         )
@@ -334,6 +387,13 @@ class Pipeline(object):
         self._executor_flags = b._ExecutorFlags.NoFlags
         if self._set_affinity:
             self._executor_flags |= b._ExecutorFlags.SetAffinity
+
+        if self._stream_policy is not None:
+            self._executor_flags &= ~b._ExecutorFlags.StreamPolicyMask
+            self._executor_flags |= self._stream_policy.value
+        if self._concurrency is not None:
+            self._executor_flags &= ~b._ExecutorFlags.ConcurrencyMask
+            self._executor_flags |= self._concurrency.value
 
         # Assign and validate output_dtype
         if isinstance(output_dtype, (list, tuple)):
@@ -454,6 +514,16 @@ class Pipeline(object):
         return self._exec_dynamic
 
     @property
+    def stream_policy(self):
+        """Stream policy for the pipeline."""
+        return self._stream_policy
+
+    @property
+    def concurrency(self):
+        """Operator concurrency for the pipeline."""
+        return self._concurrency
+
+    @property
     def set_affinity(self):
         """If True, worker threads are bound to CPU cores."""
         return self._set_affinity
@@ -568,7 +638,7 @@ class Pipeline(object):
               the output index.
 
         .. note::
-            Executor statistics are not available when using ``exec_dynamic=True``.
+            Executor statistics are available only when ``exec_dynamic=False``.
         """
         self.build()
         return self._pipe.executor_statistics()
@@ -955,6 +1025,12 @@ class Pipeline(object):
         self._exec_separated = bool(params.executor_type & b._ExecutorType.SeparatedFlag)
         self._exec_dynamic = bool(params.executor_type & b._ExecutorType.DynamicFlag)
         self._set_affinity = bool(params.executor_flags & b._ExecutorFlags.SetAffinity)
+        self._stream_policy = StreamPolicy(
+            params.executor_flags & b._ExecutorFlags.StreamPolicyMask
+        )
+        self._concurrency = OperatorConcurrency(
+            params.executor_flags & b._ExecutorFlags.ConcurrencyMask
+        )
         if self.exec_separated:
             self._prefetch_queue_depth = {"cpu": self._cpu_queue_size, "gpu": self._gpu_queue_size}
         else:
@@ -971,12 +1047,24 @@ class Pipeline(object):
         related_logical_id = {}
 
         for op in self._ops:
-            if op.relation_id not in related_logical_id:
-                related_logical_id[op.relation_id] = self._pipe.AddOperator(op.spec, op.name)
+            transfer_op = self._transfer_ops.pop(op.name, None)
+            if transfer_op is not None:
+                add_fn = self._pipe.AddOperatorInstance
+                extra = (transfer_op,)
             else:
-                self._pipe.AddOperator(op.spec, op.name, related_logical_id[op.relation_id])
+                add_fn = self._pipe.AddOperator
+                extra = ()
+            if op.relation_id in related_logical_id:
+                add_fn(op.spec, op.name, *extra, related_logical_id[op.relation_id])
+            else:
+                related_logical_id[op.relation_id] = add_fn(op.spec, op.name, *extra)
         self._backend_prepared = True
         self._names_and_devices = [(e.name, e.device) for e in self._graph_outputs]
+
+    def _transfer_operator(self, name, op_backend):
+        assert op_backend is not None
+        assert name not in self._transfer_ops
+        self._transfer_ops[name] = op_backend
 
     def _disable_pruned_external_source_instances(self):
         def truncate_str(obj, max_len=103):
@@ -1089,7 +1177,14 @@ class Pipeline(object):
     def _restore_state_from_checkpoint(self):
         if self._checkpoint is not None:
             external_ctx_cpt = self._pipe.RestoreFromSerializedCheckpoint(self._checkpoint)
-            pipeline_data = pickle.loads(external_ctx_cpt.pipeline_data)  # nosec B301
+            try:
+                pipeline_data = json.loads(external_ctx_cpt.pipeline_data)
+            except json.JSONDecodeError:
+                raise ValueError(
+                    "Pipeline checkpoint data is not a valid JSON string. "
+                    "Please make sure that the checkpoint was created with the same version "
+                    "of DALI."
+                )
             self._consumer_epoch_idx = self._epoch_idx = pipeline_data["epoch_idx"]
             self._consumer_iter = pipeline_data["iter"]
             if self._input_callbacks:
@@ -1256,9 +1351,15 @@ class Pipeline(object):
 
     def _require_exec_dynamic(self, error_message_prefix):
         if not self._exec_dynamic:
-            raise ValueError(
-                error_message_prefix + " dynamic execution, enabled by passing "
-                "`exec_dynamic=True` to the Pipeline's constructor."
+            if self._exec_separated:
+                reason = "is not compatible with separated CPU/GPU queues"
+            elif not self._exec_async or not self._exec_pipelined:
+                reason = "requires `exec_async` and `exec_pipelined` to be enabled"
+            else:
+                reason = "was explicitly disabled in this pipeline"
+
+            raise RuntimeError(
+                error_message_prefix + " legacy execution model, which " + reason + "."
             )
 
     def outputs(self, cuda_stream=None):
@@ -1274,7 +1375,7 @@ class Pipeline(object):
             e.g. ``cupy.cuda.Stream``, ``torch.cuda.Stream``
             The stream to which the returned `TensorLists` are bound.
             Defaults to None, which means that the outputs are synchronized with the host.
-            Works only with pipelines constructed with ``exec_dynamic=True``.
+            Works only with pipelines using the default execution model.
 
         Returns
         -------
@@ -1342,12 +1443,12 @@ class Pipeline(object):
             e.g. ``cupy.cuda.Stream``, ``torch.cuda.Stream``
             The stream to which the returned `TensorLists` are bound.
             Defaults to None, which means that the outputs are synchronized with the host.
-            Works only with pipelines constructed with ``exec_dynamic=True``.
+            Works only with pipelines using the default execution model.
 
         Returns
         -------
             A list of ``TensorList`` objects for respective pipeline outputs.
-            Unless using the dynamic executor, the returned buffers are valid only until
+            Unless using the default execution model, the returned buffers are valid only until
             :meth:`release_outputs` is called.
         """
         if cuda_stream is not None:
@@ -1379,7 +1480,8 @@ class Pipeline(object):
         Should not be mixed with :meth:`run` in the same pipeline.
 
         .. note::
-            When using dynamic executor (``exec_dynamic=True``), the buffers are not invalidated.
+            When using the default execution model (``exec_dynamic = True | None``),
+            the buffers are not invalidated.
         """
         with self._check_api_type_scope(types.PipelineAPIType.SCHEDULED):
             self.build()
@@ -1465,8 +1567,7 @@ class Pipeline(object):
             A tuple of `TensorList` objects for respective pipeline outputs
         """
         if len(pipeline_inputs) > 0 and not self._are_pipeline_inputs_possible():
-            raise RuntimeError(
-                f"""
+            raise RuntimeError(f"""
                 When using pipeline_inputs named arguments, either
                 `prefetch_queue_depth` in Pipeline constructor shall be set to 1 (for both devices)
                 or `exec_pipelined` shall be set to False.
@@ -1475,8 +1576,7 @@ class Pipeline(object):
                 Please set the `prefetch_queue_depth` or `exec_pipelined` argument in the Pipeline
                 constructor properly or provide inputs to DALI Pipeline via another mean
                 (e.g. `feed_input` function or `source` argument in the `fn.external_source`
-                operator.)"""
-            )
+                operator.)""")
         self.build()
         for inp_name, inp_value in pipeline_inputs.items():
             self.feed_input(inp_name, inp_value)
@@ -1491,29 +1591,21 @@ class Pipeline(object):
             raise RuntimeError("The pipeline was destroyed.")
         self._schedule_py_workers()
 
-        # We probably need some benchmarking before we remove this code path
-        if not self._exec_separated:
-            self._legacy_interleaved_prefetch()
-            return
-
-        # The new way: try to run the inputs and then feed them, finally call _pipe.Prefetch()
-        # If this fails, we just run `_pipe.Run()` a bunch of times. This will likely blow up for
-        # separated queues, which are not properly supported anyway.
-        iters_fed = 0
-        self._first_iter = False
-        iters_fed, success = self._prefetch_inputs()
-        if success:
-            self._pipe.Prefetch()
-        else:
-            self._last_iter = True
-            for _ in range(iters_fed):
-                self._pipe.Run()
+        # Keep input feeding interleaved with backend runs. Feeding all inputs
+        # first can leave separated execution with prefetched batches that have
+        # no scheduled Mixed/GPU work when a Python source reaches end of epoch.
+        self._legacy_interleaved_prefetch()
 
     # This is the old way of prefetching - the feeding and running steps are interleaved.
     # Running all callbacks at once, then feeding, then running - may affect the performance
     # of the 1st iteration.
     def _legacy_interleaved_prefetch(self):
-        for _ in range(self._cpu_queue_size):
+        prefetch_count = (
+            max(self._cpu_queue_size, self._gpu_queue_size)
+            if self._exec_separated
+            else self._cpu_queue_size
+        )
+        for _ in range(prefetch_count):
             try:
                 self._first_iter = False
                 self._iter_setup()
@@ -1524,27 +1616,6 @@ class Pipeline(object):
             except StopIteration:
                 self._last_iter = True
                 break
-
-    def _prefetch_inputs(self):
-        prefetched, success = self._run_input_callbacks(True)
-        self._batches_to_consume += prefetched
-
-        if success:
-            if self._exec_separated:
-                prefetch_count = self._cpu_queue_size + self._gpu_queue_size
-            else:
-                prefetch_count = self._cpu_queue_size
-
-            for i in range(prefetched, prefetch_count):
-                try:
-                    self.iter_setup()
-                    prefetched = i + 1
-                    self._batches_to_consume += 1
-                except StopIteration:
-                    success = False
-                    break
-
-        return prefetched, success
 
     def _run_once(self):
         """Start running the whole pipeline once without waiting for its results.
@@ -1692,12 +1763,21 @@ class Pipeline(object):
         exec_pipelined = kw.get("exec_pipelined", None)
         exec_async = kw.get("exec_async", None)
         exec_dynamic = kw.get("exec_dynamic", None)
+        stream_policy = kw.get("stream_policy", None)
+        concurrency = kw.get("concurrency", None)
         executor_type = b._MakeExecutorType(
             exec_pipelined or False, exec_async or False, exec_separated, exec_dynamic or False
         )
         executor_flags = b._ExecutorFlags.NoFlags
         if kw.get("set_affinity", False):
             executor_flags |= b._ExecutorFlags.SetAffinity
+
+        if stream_policy is not None:
+            executor_flags &= ~b._ExecutorFlags.StreamPolicyMask
+            executor_flags |= stream_policy.value
+        if concurrency is not None:
+            executor_flags &= ~b._ExecutorFlags.ConcurrencyMask
+            executor_flags |= concurrency.value
 
         seed = kw.get("seed", None)
         if seed is not None and seed < 0:
@@ -1789,7 +1869,7 @@ class Pipeline(object):
         """
 
         external_ctx_cpt = b.ExternalContextCheckpoint()
-        external_ctx_cpt.pipeline_data = pickle.dumps(
+        external_ctx_cpt.pipeline_data = json.dumps(
             {"iter": self._consumer_iter, "epoch_idx": self._epoch_idx}
         )
         external_ctx_cpt.iterator_data = iterator_data
@@ -1846,53 +1926,40 @@ class Pipeline(object):
         if iters == 0:
             self.iter_setup()
 
-    def _run_input_callbacks(self, is_prefetch=False):
+    def _run_input_callbacks(self):
         if self._input_callbacks is None:
             return 0, True
 
-        done = False
+        batches = []  # data from external source callbacks is gathered here
         stop_iter = False
-        iter = 0
-        while not done and not stop_iter:
-            done = True
-            batches = []  # data from external source callbacks is gathered here
-            for i, group in enumerate(self._parallel_input_callbacks):
-                try:
-                    count = group.feed_count(self) if is_prefetch else 1
-                    if iter < count:
-                        batches.append(
-                            group.schedule_and_receive(
-                                self, self._py_pool, i, self._max_batch_size, self._epoch_idx
-                            )
-                        )
-                        if iter + 1 < count:
-                            done = False
-                except StopIteration:
-                    stop_iter = True
-            for group in self._seq_input_callbacks:
-                try:
-                    count = group.feed_count(self) if is_prefetch else 1
-                    if iter < count:
-                        batches.append(group.get_batch(self, self._max_batch_size, self._epoch_idx))
-                        if iter + 1 < count:
-                            done = False
-                except StopIteration:
-                    stop_iter = True
-
-            if stop_iter:
-                return iter, False
-
+        for i, group in enumerate(self._parallel_input_callbacks):
             try:
-                self.iter_setup()
+                batches.append(
+                    group.schedule_and_receive(
+                        self, self._py_pool, i, self._max_batch_size, self._epoch_idx
+                    )
+                )
             except StopIteration:
-                return iter, False
+                stop_iter = True
+        for group in self._seq_input_callbacks:
+            try:
+                batches.append(group.get_batch(self, self._max_batch_size, self._epoch_idx))
+            except StopIteration:
+                stop_iter = True
 
-            # we only fill external source queues when we know that all callbacks succeeded
-            for batch in batches:
-                batch.feed()
+        if stop_iter:
+            return 0, False
 
-            iter += 1
-        return iter, True
+        try:
+            self.iter_setup()
+        except StopIteration:
+            return 0, False
+
+        # we only fill external source queues when we know that all callbacks succeeded
+        for batch in batches:
+            batch.feed()
+
+        return 1, True
 
     def iter_setup(self):
         """A deprecated method of providing the pipeline with external inputs.

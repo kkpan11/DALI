@@ -22,10 +22,10 @@ import os
 import platform
 import random
 import tempfile
+import struct
 from nose_utils import assert_raises, SkipTest
 from nose2.tools import params, cartesian_params
 from test_utils import compare_pipelines, to_array
-
 
 gds_data_root = "/scratch/"
 if not os.path.isdir(gds_data_root):
@@ -1081,5 +1081,142 @@ def test_shuffling(shuffling, pad_last_batch):
             pipe.set_outputs(data_cpu, data_gpu)
 
         for _ in range(num_samples // batch_size * 2):
-            (cpu_arr, gpu_arr) = pipe.run()
+            cpu_arr, gpu_arr = pipe.run()
             assert_array_equal(to_array(cpu_arr), to_array(gpu_arr))
+
+
+def test_o_direct_alignment():
+    def save_aligned_numpy(filename, data):
+        # standard header
+        header_dict = {
+            "descr": np.dtype(data.dtype).str,
+            "fortran_order": False,
+            "shape": data.shape,
+        }
+        header_str = str(header_dict)
+
+        # calculate padding
+        # Magic(6 bytes) + Version(2 bytes) + HeaderLen(2 bytes) + HeaderStr + Padding + '\n'
+        # make header 4096-aligned
+
+        MAGIC_LEN = 6 + 2 + 2  # 10 bytes
+        current_len = len(header_str) + 1  # +1 for newline
+
+        pad_len = 4096 - MAGIC_LEN - current_len
+
+        final_header_str = header_str + (" " * pad_len) + "\n"
+
+        with open(filename, "wb") as f:
+            f.write(b"\x93NUMPY")
+            f.write(b"\x01\x00")
+            header_len_val = len(final_header_str)
+            f.write(struct.pack("<H", header_len_val))
+
+            f.write(final_header_str.encode("ascii"))
+            f.write(data.tobytes())
+
+    with tempfile.TemporaryDirectory(prefix=gds_data_root) as test_data_root:
+        index = 0
+        fname = os.path.join(test_data_root, "test_{:02d}.npy".format(index))
+        data = np.random.rand(1024, 128).astype("float32")
+        save_aligned_numpy(fname, data)
+
+        @pipeline_def(device_id=0, batch_size=1, num_threads=1)
+        def my_pipeline(files):
+            data = fn.readers.numpy(
+                device="cpu", dont_use_mmap=True, files=files, use_o_direct=True
+            )
+            return data
+
+        p = my_pipeline(files=[fname])
+        # shouldn't throw
+        assert_array_equal(p.run()[0][0], data)
+
+
+def _collect_numpy_epoch_order(filenames, seed=None):
+    """Run a numpy reader pipeline for one epoch and return the list of sample values (int).
+
+    Each file stores a unique integer value, so the returned list represents the read order.
+    """
+    num_samples = len(filenames)
+
+    @pipeline_def(batch_size=1, num_threads=1, device_id=0)
+    def make_pipe():
+        data = fn.readers.numpy(
+            device="cpu",
+            files=filenames,
+            shuffle_after_epoch=True,
+            shard_id=0,
+            num_shards=1,
+            shuffle_after_epoch_seed=seed,
+        )
+        return data
+
+    pipe = make_pipe()
+    pipe.build()
+
+    order = []
+    for _ in range(num_samples):
+        out = pipe.run()
+        order.append(int(to_array(out[0])[0][0]))
+
+    return order
+
+
+def test_shuffle_after_epoch_seed_numpy_reproducible():
+    """Same shuffle_after_epoch_seed should produce the same order across runs."""
+    with tempfile.TemporaryDirectory() as test_data_root:
+        num_samples = 20
+        filenames = []
+        for i in range(num_samples):
+            fname = os.path.join(test_data_root, "sample_{:03d}.npy".format(i))
+            np.save(fname, np.array([i], dtype=np.float32))
+            filenames.append(fname)
+
+        seed = 42
+        order1 = _collect_numpy_epoch_order(filenames, seed=seed)
+        order2 = _collect_numpy_epoch_order(filenames, seed=seed)
+
+        assert (
+            order1 == order2
+        ), "Same shuffle_after_epoch_seed should produce the same reading order"
+
+
+def test_shuffle_after_epoch_seed_numpy_different_seeds():
+    """Different shuffle_after_epoch_seed values should produce different orders."""
+    with tempfile.TemporaryDirectory() as test_data_root:
+        num_samples = 20
+        filenames = []
+        for i in range(num_samples):
+            fname = os.path.join(test_data_root, "sample_{:03d}.npy".format(i))
+            np.save(fname, np.array([i], dtype=np.float32))
+            filenames.append(fname)
+
+        order_seed1 = _collect_numpy_epoch_order(filenames, seed=11111)
+        order_seed2 = _collect_numpy_epoch_order(filenames, seed=99999)
+
+        assert (
+            order_seed1 != order_seed2
+        ), "Different shuffle_after_epoch_seed values should produce different orders"
+        # Both orderings should contain all samples
+        assert (
+            sorted(order_seed1) == sorted(order_seed2) == list(range(num_samples))
+        ), "All samples should be present regardless of seed"
+
+
+def test_shuffle_after_epoch_seed_numpy_default_reproducible():
+    """Without explicit seed, two pipelines should produce the same default order."""
+    with tempfile.TemporaryDirectory() as test_data_root:
+        num_samples = 20
+        filenames = []
+        for i in range(num_samples):
+            fname = os.path.join(test_data_root, "sample_{:03d}.npy".format(i))
+            np.save(fname, np.array([i], dtype=np.float32))
+            filenames.append(fname)
+
+        order1 = _collect_numpy_epoch_order(filenames, seed=None)
+        order2 = _collect_numpy_epoch_order(filenames, seed=None)
+
+        assert (
+            order1 == order2
+        ), "Without explicit seed, default behavior should be reproducible (backward compat)"

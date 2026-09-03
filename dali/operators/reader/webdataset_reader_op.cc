@@ -1,4 +1,4 @@
-// Copyright (c) 2021-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2021-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -50,7 +50,7 @@ void WebdatasetReader::RunImpl(Workspace &ws) {
     auto& output = ws.Output<CPUBackend>(output_idx);
     for (int data_idx = 0; data_idx < num_samples; data_idx++) {
       auto& sample = GetSample(data_idx);
-      ThreadPool::Work copy_task = [output_idx = output_idx, data_idx = data_idx, &output,
+      auto copy_task = [output_idx = output_idx, data_idx = data_idx, &output,
                                     &sample](int) {
         output.SetMeta(data_idx, sample[output_idx].GetMeta());
         std::memcpy(output.raw_mutable_tensor(data_idx), sample[output_idx].raw_data(),
@@ -132,12 +132,12 @@ when turned off: jpg, JPG, jPG should work.
 If the extension characters cannot be represented as ASCI the result of turing this option off
 is undefined.
 )code", true)
-    .AddOptionalArg("index_paths",
+    .AddOptionalArg<std::vector<std::string>>("index_paths",
             R"code(The list of the index files corresponding to the respective webdataset archives.
 
 Has to be the same length as the `paths` argument. In case it is not provided,
 it will be inferred automatically from the webdataset archive.)code",
-            std::vector<std::string>())
+            nullptr)
     .AddOptionalArg(
         "missing_component_behavior",
         R"code(Specifies what to do in case there is not any file in a sample corresponding to a certain output.
@@ -154,6 +154,32 @@ Moreover, the tar file should be constructed so that it will only output a sampl
 divisible by the size of the data type.)code",
                     DALI_DATA_TYPE_VEC,
                     nullptr)  // default is a vector of uint8
+    .AddOptionalArg("shuffle_after_epoch",
+        R"code(If set to True, the reader reshuffles the order of the tar archives (shards) after
+each epoch, while preserving sequential reads within each archive.
+
+This keeps I/O access patterns sequential — only the order in which whole shards are visited
+changes between epochs. ``random_shuffle`` can be combined with this option to additionally
+shuffle samples within the pipeline's prefetch buffer.
+
+``stick_to_shard`` cannot be used when this argument is set to True.)code",
+        false)
+    .AddOptionalArg<int64_t>("shuffle_after_epoch_seed",
+        R"code(Random seed for the shard-order shuffling performed after each epoch.
+
+If not provided, a fixed default seed is used, which results in the same shuffling
+pattern across different training runs. Providing a custom seed allows for different
+shuffle patterns across training runs, which may be desirable for better statistical
+properties.
+
+.. note::
+    When using multiple DALI pipelines (e.g., for multi-GPU training), all pipeline
+    instances should use the same ``shuffle_after_epoch_seed`` to ensure a consistent
+    global shard-order shuffle across all shards.
+
+.. note::
+    This argument has no effect unless ``shuffle_after_epoch`` is set to ``True``.)code",
+        nullptr, false)
     .AddParent("LoaderBase");
 
 DALI_REGISTER_OPERATOR(readers__Webdataset, WebdatasetReader, CPU);

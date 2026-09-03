@@ -1,4 +1,4 @@
-// Copyright (c) 2020-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2020-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -137,6 +137,22 @@ This argument is mutually exclusive with `files`.)", nullptr)
 
 `stick_to_shard` and `random_shuffle` cannot be used when this argument is set to True.)",
       false)
+  .AddOptionalArg<int64_t>("shuffle_after_epoch_seed",
+      R"(Random seed for the dataset shuffling performed after each epoch.
+
+If not provided, a fixed default seed is used, which results in the same shuffling
+pattern across different training runs. Providing a custom seed allows for different
+shuffle patterns across training runs, which may be desirable for better statistical
+properties.
+
+.. note::
+    When using multiple DALI pipelines (e.g., for multi-GPU training), all pipeline
+    instances should use the same `shuffle_after_epoch_seed` to ensure a consistent
+    global shuffle across all shards.
+
+.. note::
+    This argument has no effect unless `shuffle_after_epoch` is set to ``True``.)",
+      nullptr, false)
   .AddOptionalArg<vector<string>>("files", R"(A list of file paths to read the data from.
 
 If `file_root` is provided, the paths are treated as being relative to it.
@@ -227,12 +243,13 @@ DALI_SCHEMA(NumpyReader)
     .NumInput(0)
     .NumOutput(1)  // (Arrays)
     .AddParent("readers__Numpy")
-    .MakeDocPartiallyHidden()
+    .MakeDocHidden()
     .Deprecate(
+        "1.0",
         "readers__Numpy",
         R"code(In DALI 1.0 all readers were moved into a dedicated :mod:`~nvidia.dali.fn.readers`
 submodule and renamed to follow a common pattern. This is a placeholder operator with identical
-functionality to allow for backward compatibility.)code");  // Deprecated in 1.0;
+functionality to allow for backward compatibility.)code");
 
 NumpyReaderCPU::~NumpyReaderCPU() {
   // Stop the prefetch thread as it uses the thread pool from this class. So before we can
@@ -295,7 +312,7 @@ void NumpyReaderCPU::Prefetch() {
 
       // split data into chunks and copy separately
       auto file = dynamic_cast<ODirectFileStream*>(target->current_file.get());
-      auto read_tail = alignment_offset(target->data_offset + target->nbytes, o_direct_chunk_size_);
+      auto read_tail = alignment_offset(target_data_offset + target->nbytes, o_direct_chunk_size_);
       for (size_t read_offset = 0; read_offset < aligned_len; read_offset += o_direct_chunk_size_) {
         // read whole chunk or just aligned number of blocks to match aligned_len
         auto read_size = std::min(o_direct_chunk_size_, aligned_len - read_offset);

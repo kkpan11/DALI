@@ -1,4 +1,4 @@
-// Copyright (c) 2017-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2017-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -108,9 +108,14 @@ sequence and a warning. This option is mutually exclusive with `filenames`
 and `file_root`.)code",
       std::string())
   .AddOptionalArg("enable_frame_num",
-      R"code(If the `file_list` or `filenames` argument is passed, returns the frame number
-output.)code",
-      false)
+      R"code(Determines what frame number information is returned as an additional output.
+Only available when `file_list` or `filenames` with `labels` is passed.
+
+* ``None`` or ``False`` (default): No frame number output.
+* ``"scalar"`` or ``True``: Returns the index of the first frame in the decoded sequence, shape ``(1,)``.
+* ``"sequence"``: Returns the frame index of each decoded frame, shape ``(F,)``. For padded
+  frames, the index is ``-1``.)code",
+      std::string("none"))
   .AddOptionalArg("enable_timestamps",
       R"code(If the `file_list` or `filenames` argument is passed, returns the timestamps
 output. )code",
@@ -203,11 +208,12 @@ DALI_SCHEMA(VideoReader)
     .NumInput(0)
     .OutputFn(detail::VideoReaderOutputFn)
     .AddParent("readers__Video")
-    .MakeDocPartiallyHidden()
+    .MakeDocHidden()
     .Deprecate(
+        "1.0",
         "readers__Video",
         R"code(In DALI 1.0 all readers were moved into a dedicated :mod:`~nvidia.dali.fn.readers`
 submodule and renamed to follow a common pattern. This is a placeholder operator with identical
-functionality to allow for backward compatibility.)code");  // Deprecated in 1.0;
+functionality to allow for backward compatibility.)code");
 
 }  // namespace dali

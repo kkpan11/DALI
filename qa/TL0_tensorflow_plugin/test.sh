@@ -19,35 +19,35 @@ test_body() {
     pip uninstall -y `pip list | grep nvidia-dali-tf-plugin | cut -d " " -f1` || true
 
     # No plugin installed, should fail
-    ${python_invoke_test} test_dali_tf_plugin.py:TestDaliTfPluginLoadFail
+    ${python_new_invoke_test} test_dali_tf_plugin.TestDaliTfPluginLoadFail
 
     # Installing "current" dali tf (built against installed TF)
-    pip install ../../../nvidia_dali_tf_plugin*.tar.gz
-    ${python_invoke_test} test_dali_tf_plugin.py:TestDaliTfPluginLoadOk
+    pip install ../../../nvidia_dali_tf_plugin*.tar.gz --no-build-isolation
+    ${python_new_invoke_test} test_dali_tf_plugin.TestDaliTfPluginLoadOk
 
     # Installing "current" dali tf (built against installed TF) - force rebuild without DALI using internal stubs
     # and then install DALI again
     pip uninstall -y `pip list | grep nvidia-dali-tf-plugin | cut -d " " -f1` || true
     pip uninstall -y `pip list | grep nvidia-dali | cut -d " " -f1` || true
-    DALI_TF_ALWAYS_BUILD=1 pip install --no-deps ../../../nvidia_dali_tf_plugin*.tar.gz
+    DALI_TF_ALWAYS_BUILD=1 pip install --no-deps ../../../nvidia_dali_tf_plugin*.tar.gz --no-build-isolation
     pip install ../../../nvidia_dali_*.whl
-    ${python_invoke_test} test_dali_tf_plugin.py:TestDaliTfPluginLoadOk
+    ${python_new_invoke_test} test_dali_tf_plugin.TestDaliTfPluginLoadOk
 
     # DALI TF run
-    ${python_invoke_test} test_dali_tf_plugin_run.py
+    ${python_new_invoke_test} test_dali_tf_plugin_run
 
     # DALI TF DATASET run
-    ${python_invoke_test} test_dali_tf_dataset.py
-    ${python_invoke_test} test_dali_tf_conditionals.py
+    ${python_new_invoke_test} test_dali_tf_dataset
+    ${python_new_invoke_test} test_dali_tf_conditionals
     ${python_new_invoke_test} checkpointing.test_dali_checkpointing_tf_plugin
     if [ -z "$DALI_ENABLE_SANITIZERS" ]; then
-        ${python_invoke_test} test_dali_tf_dataset_shape.py
-        ${python_invoke_test} test_dali_tf_dataset_eager.py
-        ${python_invoke_test} test_dali_tf_dataset_graph.py
+        ${python_new_invoke_test} test_dali_tf_dataset_shape
+        ${python_new_invoke_test} test_dali_tf_dataset_eager
+        ${python_new_invoke_test} test_dali_tf_dataset_graph
     fi
 
     # DALI TF + dynamic executor
-    ${python_invoke_test} test_dali_tf_exec2.py
+    ${python_new_invoke_test} test_dali_tf_exec2
 }
 
 pushd ../..

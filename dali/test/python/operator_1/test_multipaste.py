@@ -19,7 +19,6 @@ from test_utils import get_dali_extra_path
 from nose_utils import assert_raises
 from nose2.tools import params, cartesian_params
 
-
 DEBUG_LVL = 0
 SHOW_IMAGES = False
 
@@ -137,8 +136,8 @@ def prepare_cuts(
 
             if DEBUG_LVL >= 1:
                 print(
-                    f"""in_idx: {in_idx}, out_idx: {out_idx}, in_anchor: {
-                in_anchor}, in_shape: {shape}, out_anchor: {out_anchor}"""
+                    f"in_idx: {in_idx}, out_idx: {out_idx}, in_anchor: {in_anchor}, "
+                    f"in_shape: {shape}, out_anchor: {out_anchor}"
                 )
 
             in_idx_l[out_idx] = np.append(in_idx_l[out_idx], [in_idx], axis=0)

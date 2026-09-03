@@ -1,4 +1,4 @@
-// Copyright (c) 2017-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2017-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -192,7 +192,7 @@ DALI_SCHEMA(BoxEncoder)
 passed as an argument.
 
 This operator follows the algorithm described in "SSD: Single Shot MultiBox Detector"
-and implemented in https://github.com/mlperf/training/tree/master/single_stage_detector/ssd.
+and implemented in https://github.com/mlcommons/training/tree/v4.0/single_stage_detector/ssd.
 Inputs must be supplied as the following Tensors:
 
 - ``BBoxes`` that contain bounding boxes that are represented as ``[l,t,r,b]``.
@@ -230,6 +230,9 @@ in EncodedBBoxes that use ``std`` and the ``mean`` and `scale` arguments.)code",
             std::vector<float>{0.f, 0.f, 0.f, 0.f})
     .AddOptionalArg("stds",
             R"code([x y w h] standard deviations for offset normalization.)code",
-            std::vector<float>{1.f, 1.f, 1.f, 1.f});
+            std::vector<float>{1.f, 1.f, 1.f, 1.f})
+    .OutputDType(0, std::nullopt)
+    .OutputNDim(0, std::nullopt)
+    .OutputLayout(0, std::nullopt);
 
 }  // namespace dali

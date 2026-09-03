@@ -1,4 +1,4 @@
-# Copyright (c) 2017-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2017-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,7 +20,6 @@ set(DALI_INST_HDRS ${DALI_INST_HDRS}
   "${CMAKE_CURRENT_SOURCE_DIR}/std_file.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/odirect_file.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/ocv.h"
-  "${CMAKE_CURRENT_SOURCE_DIR}/random_crop_generator.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/thread_safe_queue.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/numpy.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/user_stream.h"
@@ -36,7 +35,6 @@ set(DALI_SRCS ${DALI_SRCS}
   "${CMAKE_CURRENT_SOURCE_DIR}/std_file.cc"
   "${CMAKE_CURRENT_SOURCE_DIR}/odirect_file.cc"
   "${CMAKE_CURRENT_SOURCE_DIR}/ocv.cc"
-  "${CMAKE_CURRENT_SOURCE_DIR}/random_crop_generator.cc"
   "${CMAKE_CURRENT_SOURCE_DIR}/user_stream.cc"
   "${CMAKE_CURRENT_SOURCE_DIR}/numpy.cc"
   "${CMAKE_CURRENT_SOURCE_DIR}/uri.cc")
@@ -68,7 +66,6 @@ if (BUILD_AWSSDK)
 endif()
 
 set(DALI_TEST_SRCS ${DALI_TEST_SRCS}
-  "${CMAKE_CURRENT_SOURCE_DIR}/random_crop_generator_test.cc"
   "${CMAKE_CURRENT_SOURCE_DIR}/numpy_test.cc"
   "${CMAKE_CURRENT_SOURCE_DIR}/uri_test.cc")
 
@@ -79,6 +76,21 @@ foreach(incl_dir ${INFERED_COMPILER_INCLUDE})
   set(DEFAULT_COMPILER_INCLUDE "${DEFAULT_COMPILER_INCLUDE} -I${incl_dir}")
 endforeach(incl_dir)
 separate_arguments(DEFAULT_COMPILER_INCLUDE UNIX_COMMAND  "${DEFAULT_COMPILER_INCLUDE}")
+
+# CUDA 13 include add a cccl subdir, that is detected by CMake and CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES
+# becomes a list instead of a single dir. In our code we relay on it being a single entry, so this
+# code makes sure we extract the first path from the list and use it further (assuming it is the main dir)
+# So we check if it is a list (; inside) and act accordingly
+string(FIND "${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}" ";" SEMICOLON_POS)
+if(NOT "${SEMICOLON_POS}" EQUAL -1)
+    set(CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES_DIRECTIVE)
+    foreach(incl_dir ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+       set(CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES_DIRECTIVE "${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES_DIRECTIVE} -I${incl_dir}")
+    endforeach(incl_dir)
+else()
+    set(CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES_DIRECTIVE "-I${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}")
+endif()
+separate_arguments(CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES_DIRECTIVE UNIX_COMMAND  "${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES_DIRECTIVE}")
 
 if(BUILD_NVML)
   set(DALI_INST_HDRS ${DALI_INST_HDRS}
@@ -91,12 +103,14 @@ if(BUILD_NVML)
         OUTPUT ${NVML_GENERATED_STUB}
         COMMAND python ${CMAKE_CURRENT_SOURCE_DIR}/../../internal_tools/stub_generator/stub_codegen.py --unique_prefix=Nvml --
                     "${CMAKE_CURRENT_SOURCE_DIR}/../../internal_tools/stub_generator/nvml.json" ${NVML_GENERATED_STUB}
-                    "${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}/nvml.h" "-I${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}"
+                    "${CUDAToolkit_TARGET_DIR}/include/nvml.h" "-I${CUDAToolkit_TARGET_DIR}/include"
                     # for some reason QNX fails with 'too many errors emitted' is this is not set
                     "-ferror-limit=0"
+                    # let clang know which architecutre we compile for
+                    "--target=${CMAKE_SYSTEM_PROCESSOR}-linux-gnu"
                     ${DEFAULT_COMPILER_INCLUDE}
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/../../internal_tools/stub_generator/stub_codegen.py
-                "${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}/nvml.h"
+                "${CUDAToolkit_TARGET_DIR}/include/nvml.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/../../internal_tools/stub_generator/nvml.json"
         COMMENT "Running nvml.h stub generator"
         VERBATIM)

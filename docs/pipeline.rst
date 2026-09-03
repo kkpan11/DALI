@@ -1,7 +1,7 @@
 .. _pipeline:
 
-Pipeline
-========
+Pipeline and processing graph
+=============================
 
 .. currentmodule:: nvidia.dali
 
@@ -51,7 +51,7 @@ The resulting graph is:
 .. _processing_graph_structure:
 
 .. important::
-    The pipeline definition function is excuted only once, when the pipeline is built,
+    The pipeline definition function is executed only once, when the pipeline is built,
     and typically returns a ``dali.DataNode`` object or a tuple of thereof.
     For convenience, it's possible to return other types, such as NumPy arrays, but those
     are treated as constants and evaluated only once.
@@ -67,11 +67,8 @@ that can be specified for the operator, and are executed in following order:
 #. ``'mixed'`` - operators that accept CPU inputs and produce GPU outputs, for example :meth:`nvidia.dali.fn.decoders.image`.
 #. ``'gpu'`` - operators that accept GPU inputs and produce GPU outputs.
 
-Data produced by a CPU operator may be explicitly copied to the GPU by calling ``.gpu()``
+Data can be transferred between CPU and GPU by calling ``.gpu()`` and ``.cpu()``
 on a :class:`~nvidia.dali.pipeline.DataNode` (an output of a DALI operator).
-
-Data that has been produced by a later stage cannot be consumed by an operator executing
-in an earlier stage.
 
 Most DALI operators accept additional keyword arguments used to parametrize their behavior.
 Those named keyword arguments (which are distinct from the positional inputs) can be:
@@ -83,7 +80,7 @@ In the case of argument inputs, passing output of one operator as a **named keyw
 of other operator will establish a connection in the processing graph.
 
 Those parameters will be computed as a part of DALI pipeline graph every iteration and
-for every sample. Keep in mind, that only CPU operators can be used as argument inputs.
+for every sample.
 
 Example::
 
@@ -116,7 +113,7 @@ Current Pipeline
 Subgraphs that do not contribute to the pipeline output are automatically pruned.
 If an operator has side effects (e.g. ``PythonFunction`` operator family), it cannot be invoked
 without setting the current pipeline. Current pipeline is set implicitly when the graph is
-defined inside derived pipelines' :meth:`Pipeline.define_graph` method.
+defined a function decorated with :meth:`pipeline_def` or in :meth:`Pipeline.define_graph` method.
 Otherwise, it can be set using context manager (``with`` statement)::
 
     pipe = dali.Pipeline(batch_size=N, num_threads=3, device_id=0)
@@ -197,62 +194,15 @@ Pipeline class
    :members:
    :special-members: __enter__, __exit__
 
+
 DataNode
 --------
 .. autoclass:: nvidia.dali.pipeline.DataNode
    :members:
 
-Experimental Pipeline Features
-------------------------------
-Some additional experimental features can be enabled via the special variant of the pipeline
-decorator.
 
-.. autodecorator:: nvidia.dali.pipeline.experimental.pipeline_def
+Executor configuration flags
+----------------------------
 
-
-Pipeline Debug Mode (experimental)
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-Pipeline can be run in debug mode by replacing ``@nvidia.dali.pipeline_def`` decorator with its
-experimental variant ``@nvidia.dali.pipeline.experimental.pipeline_def`` and setting parameter
-``debug`` to True. It allows you to access and modify data inside the pipeline execution graph,
-as well as use non-DALI data types as inputs to the DALI operators.
-
-In this mode outputs of operators are of type ``DataNodeDebug`` which is an equivalent to
-``DataNode`` in the standard mode. You can perform the same operations on objects of type
-``DataNodeDebug`` as on ``DataNode``, that includes arithmetic operations.
-
-Use ``.get()`` to access data associated with the ``DataNodeDebug`` object during current execution
-of :meth:`Pipeline.run`::
-
-    @nvidia.dali.pipeline.experimental.pipeline_def(debug=True)
-    def my_pipe():
-        data, _ = fn.readers.file(file_root=images_dir)
-        img = fn.decoders.image(data)
-        print(np.array(img.get()[0]))
-        ...
-
-Use non-DALI data types (e.g. NumPy ndarray, PyTorch Tensor) directly with DALI operators::
-
-    @nvidia.dali.pipeline.experimental.pipeline_def(batch_size=8, debug=True)
-    def my_pipe():
-        img = [np.random.rand(640, 480, 3) for _ in range(8)]
-        output = fn.flip(img)
-        ...
-
-Notice
-~~~~~~
-
-* Seed generation in debug mode works differently than in standard mode (it is deterministic but
-  different). If you want to achieve the same results in debug mode as in standard mode initialize
-  operators with the ``seed`` parameter.
-* Direct calls to operators work only in a scope of the ``pipeline_def`` function, you cannot use
-  them this way outside of ``pipeline_def``.
-* You cannot change the order of operators inside the pipeline between the iterations.
-
-.. warning::
-    Using debug mode will drastically worsen performance of your pipeline. Use it only for
-    debugging purposes.
-
-.. note::
-    This feature is experimental and its API might change without notice.
+.. autoenum:: nvidia.dali.StreamPolicy
+.. autoenum:: nvidia.dali.OperatorConcurrency

@@ -1,4 +1,4 @@
-// Copyright (c) 2017-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2017-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -38,7 +38,12 @@ void Copy<CPUBackend>::RunImpl(Workspace &ws) {
   } else {
     auto &input = ws.Input<GPUBackend>(0);
     auto &output = ws.Output<CPUBackend>(0);
+    if (!output.order())
+      output.set_order(AccessOrder::host());
+    DeviceGuard g(input.device_id());
     output.Copy(input, ws.output_order());
+    // CPU operators assume that their CPU inputs are immediately accessible.
+    AccessOrder::host().wait(ws.output_order());
   }
 }
 

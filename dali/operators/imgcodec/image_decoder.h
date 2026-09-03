@@ -1,4 +1,4 @@
-// Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -56,21 +56,6 @@ struct OutBackend<CPUBackend> {
   using type = CPUBackend;
 };
 
-
-constexpr uint32_t verbosity_to_severity(int verbose) {
-  uint32_t result = 0;
-  if (verbose >= 1)
-    result |= NVIMGCODEC_DEBUG_MESSAGE_SEVERITY_FATAL | NVIMGCODEC_DEBUG_MESSAGE_SEVERITY_ERROR;
-  if (verbose >= 2)
-    result |= NVIMGCODEC_DEBUG_MESSAGE_SEVERITY_WARNING;
-  if (verbose >= 3)
-    result |= NVIMGCODEC_DEBUG_MESSAGE_SEVERITY_INFO;
-  if (verbose >= 4)
-    result |= NVIMGCODEC_DEBUG_MESSAGE_SEVERITY_DEBUG;
-  if (verbose >= 5)
-    result |= NVIMGCODEC_DEBUG_MESSAGE_SEVERITY_TRACE;
-  return result;
-}
 
 static constexpr size_t kDevAlignment = 256;  // warp alignment for 32x64-bit
 static constexpr size_t kHostAlignment = 64;  // cache alignment
@@ -145,7 +130,7 @@ inline void get_nvimgcodec_version(int *major, int *minor, int *patch) {
 template <typename Backend>
 class ImageDecoder : public StatelessOperator<Backend> {
  public:
-  ~ImageDecoder() override {
+  ~ImageDecoder() noexcept override {
 #if not(WITH_DYNAMIC_NVIMGCODEC_ENABLED)
     decoder_.reset();  // first stop the decoder
     for (auto &extension : extensions_) {
@@ -167,6 +152,7 @@ class ImageDecoder : public StatelessOperator<Backend> {
 
   struct SampleState {
     ParsedSample parsed_sample = {};
+    NvImageCodecCodeStream sub_encoded_stream = {};
     NvImageCodecImage image = {};
     nvimgcodecImageInfo_t image_info = {};
     TensorShape<> out_shape = {};
@@ -228,7 +214,7 @@ class ImageDecoder : public StatelessOperator<Backend> {
     GetDecoderSpecificArguments(spec);
 
     if (std::is_same<MixedBackend, Backend>::value) {
-      thread_pool_ = std::make_unique<ThreadPool>(num_threads_, device_id_,
+      thread_pool_ = std::make_unique<OldThreadPool>(num_threads_, device_id_,
                                                   spec.GetArgument<bool>("affine"), "MixedDecoder");
       if (spec_.HasArgument("cache_size"))
         cache_ = std::make_unique<CachedDecoderImpl>(spec_);
@@ -289,22 +275,10 @@ class ImageDecoder : public StatelessOperator<Backend> {
     };
 
     load_ext(get_opencv_extension_desc);
-
-#if LIBJPEG_TURBO_ENABLED
     load_ext(get_libjpeg_turbo_extension_desc);
-#endif
-
-#if LIBTIFF_ENABLED
     load_ext(get_libtiff_extension_desc);
-#endif
-
-#if NVJPEG_ENABLED
     load_ext(get_nvjpeg_extension_desc);
-#endif
-
-#if NVJPEG2K_ENABLED
     load_ext(get_nvjpeg2k_extension_desc);
-#endif
 
 #endif
 
@@ -409,14 +383,17 @@ class ImageDecoder : public StatelessOperator<Backend> {
   nvimgcodecStatus_t schedule(int device_id, int sample_idx, void *task_context,
                               void (*task)(int thread_id, int sample_idx, void *task_context)) {
     assert(tp_);
-    tp_->AddWork([=](int tid) { task(tid, sample_idx, task_context); }, -(task_count_++), false);
+    nvimgcodec_scheduled_tasks_.emplace_back([=](int tid) { task(tid, sample_idx, task_context); });
     return NVIMGCODEC_STATUS_SUCCESS;
   }
 
   nvimgcodecStatus_t run(int device_id) {
     assert(tp_);
+    for (int i = 0; i < static_cast<int>(nvimgcodec_scheduled_tasks_.size()); i++) {
+      tp_->AddWork(std::move(nvimgcodec_scheduled_tasks_[i]), -i);
+    }
+    nvimgcodec_scheduled_tasks_.clear();
     tp_->RunAll(false);
-    task_count_ = 0;
     return NVIMGCODEC_STATUS_SUCCESS;
   }
 
@@ -539,13 +516,17 @@ class ImageDecoder : public StatelessOperator<Backend> {
            MAKE_SEMANTIC_VERSION(req_major, req_minor, req_patch);
   }
 
-  void PrepareOutput(SampleState &st, void *out_ptr, const ROI &roi, const Workspace &ws) {
+  /**
+   * @brief Populate the descriptor
+   *
+   * The memory is allocated later and image object is created when the pointer is available.
+   */
+  void PrepareOutput(SampleState &st, const ROI &roi, const Workspace &ws) {
     // Make a copy of the parsed img info. We might modify it
     // (for example, request planar vs. interleaved, etc)
     st.image_info = st.parsed_sample.nvimgcodec_img_info;
     st.req_layout = "HWC";
     st.req_img_type = format_;
-    auto info = st.parsed_sample.dali_img_info;
     int64_t &nchannels = st.out_shape[2];
     auto decode_shape = st.out_shape;
 
@@ -575,14 +556,6 @@ class ImageDecoder : public StatelessOperator<Backend> {
 
     st.image_info.cuda_stream = std::is_same<MixedBackend, Backend>::value ? ws.stream() : nullptr;
 
-    st.image_info.region.ndim = roi.use_roi() ? 2 : 0;
-    if (roi.use_roi()) {
-      st.image_info.region.start[0] = roi.begin[0];
-      st.image_info.region.start[1] = roi.begin[1];
-      st.image_info.region.end[0] = roi.end[0];
-      st.image_info.region.end[1] = roi.end[1];
-    }
-
     // At the moment we are not dealing with floating point outputs in nvimagecodec
     assert(IsIntegral(st.parsed_sample.orig_dtype));
 
@@ -605,7 +578,6 @@ class ImageDecoder : public StatelessOperator<Backend> {
                                     NVIMGCODEC_IMAGE_BUFFER_KIND_STRIDED_HOST;
     int64_t image_buffer_size =
         volume(decode_shape) * TypeTable::GetTypeInfo(st.parsed_sample.orig_dtype).size();
-    st.image_info.buffer_size = image_buffer_size;
 
     st.decode_out_cpu = {};
     st.decode_out_gpu = {};
@@ -622,7 +594,7 @@ class ImageDecoder : public StatelessOperator<Backend> {
         st.decode_out_cpu = {st.image_info.buffer, decode_shape, st.parsed_sample.orig_dtype};
       }
     } else {
-      st.image_info.buffer = out_ptr;
+      st.image_info.buffer = nullptr;
     }
 
     st.image_info.num_planes = 1;
@@ -632,7 +604,6 @@ class ImageDecoder : public StatelessOperator<Backend> {
     st.image_info.plane_info[0].height = decode_shape[0];
     st.image_info.plane_info[0].width = decode_shape[1];
     st.image_info.plane_info[0].num_channels = decode_shape[2];
-    st.image = NvImageCodecImage::Create(instance_, &st.image_info);
   }
 
   bool HasContiguousOutputs() const override {
@@ -648,9 +619,10 @@ class ImageDecoder : public StatelessOperator<Backend> {
     if (output.sample_dim() != 3)
       output.set_sample_dim(3);
     output.set_type(dtype_);
-    output.SetContiguity(BatchContiguity::Noncontiguous);
     output.SetLayout("HWC");
     output.SetSize(nsamples);
+
+    AccessOrder order = std::is_same_v<Backend, CPUBackend> ? AccessOrder::host() : ws.stream();
 
     tp_ = GetThreadPool(ws);
     assert(tp_ != nullptr);
@@ -672,6 +644,8 @@ class ImageDecoder : public StatelessOperator<Backend> {
     decode_sample_idxs_.reserve(nsamples);
     decode_status_.clear();
 
+    TensorListShape<> out_shape(nsamples, 3);
+
     const bool use_cache = cache_ && cache_->IsCacheEnabled() && dtype_ == DALI_UINT8;
     auto setup_block = [&](int block_idx, int nblocks, int tid) {
       int i_start = nsamples * block_idx / nblocks;
@@ -680,6 +654,7 @@ class ImageDecoder : public StatelessOperator<Backend> {
                           DomainTimeRange::kOrange);
       for (int i = i_start; i < i_end; i++) {
         auto *st = state_[i].get();
+        st->image_info.buffer = nullptr;
         assert(st != nullptr);
         const auto &input_sample = input[i];
 
@@ -688,9 +663,9 @@ class ImageDecoder : public StatelessOperator<Backend> {
           auto cached_shape = cache_->CacheImageShape(src_info);
           auto roi = GetRoi(spec_, ws, i, cached_shape);
           if (!roi.use_roi()) {
+            st->out_shape = cached_shape;
+            out_shape.set_tensor_shape(i, cached_shape);
             st->load_from_cache = true;
-            output.ResizeSample(i, st->out_shape);
-            st->image_info.buffer = output.raw_mutable_tensor(i);
             continue;
           }
         }
@@ -720,10 +695,29 @@ class ImageDecoder : public StatelessOperator<Backend> {
           }
           st->out_shape[0] = roi_sh[0];
           st->out_shape[1] = roi_sh[1];
+
+          nvimgcodecCodeStreamView_t cs_view = {
+              NVIMGCODEC_STRUCTURE_TYPE_CODE_STREAM_VIEW,
+              sizeof(nvimgcodecCodeStreamView_t),
+              nullptr,
+              0,  // image_idx
+              {NVIMGCODEC_STRUCTURE_TYPE_REGION, sizeof(nvimgcodecRegion_t), nullptr, 2}};
+          cs_view.region.start[0] = roi.begin[0];
+          cs_view.region.start[1] = roi.begin[1];
+          cs_view.region.end[0] = roi.end[0];
+          cs_view.region.end[1] = roi.end[1];
+          nvimgcodecCodeStream_t sub_encoded_stream = st->sub_encoded_stream.get();
+          if (sub_encoded_stream) {  // reuses the code stream object
+            CHECK_NVIMGCODEC(nvimgcodecCodeStreamGetSubCodeStream(
+                st->parsed_sample.encoded_stream.get(), &sub_encoded_stream, &cs_view));
+          } else {
+            st->sub_encoded_stream = NvImageCodecCodeStream::FromSubCodeStream(
+                st->parsed_sample.encoded_stream.get(), &cs_view);
+          }
         }
-        output.ResizeSample(i, st->out_shape);
-        PrepareOutput(*state_[i], output.raw_mutable_tensor(i), rois_[i], ws);
-        assert(!ws.has_stream() || ws.stream() == st->image_info.cuda_stream);
+        out_shape.set_tensor_shape(i, st->out_shape);
+        PrepareOutput(*state_[i], rois_[i], ws);
+        assert(!order.is_device() || order.stream() == st->image_info.cuda_stream);
       }
     };
 
@@ -732,6 +726,7 @@ class ImageDecoder : public StatelessOperator<Backend> {
     int ntasks = std::min<int>(nblocks, std::min<int>(8, tp_->NumThreads() + 1));
 
     if (ntasks < 2) {
+      DomainTimeRange tr("Setup", DomainTimeRange::kOrange);
       setup_block(0, 1, -1);  // run all in current thread
     } else {
       int block_idx = 0;
@@ -753,18 +748,36 @@ class ImageDecoder : public StatelessOperator<Backend> {
       tp_->WaitForWork();  // wait for the other threads
     }
 
+    // Allocate the memory for the outputs...
+    {
+      DomainTimeRange tr("Alloc output", DomainTimeRange::kOrange);
+      output.Resize(out_shape);
+    }
+    // ... and create image descriptors.
     bool any_need_processing = false;
-    bool has_any_roi = false;
     for (int orig_idx = 0; orig_idx < nsamples; orig_idx++) {
       auto &st = *state_[orig_idx];
+      bool has_roi = rois_[orig_idx].use_roi();
       any_need_processing |= state_[orig_idx]->need_processing;
       if (use_cache && st.load_from_cache) {
         auto *data_ptr = output.raw_mutable_tensor(orig_idx);
         auto src_info = input.GetMeta(orig_idx).GetSourceInfo();
         cache_->DeferCacheLoad(src_info, static_cast<uint8_t *>(data_ptr));
       } else {
-        has_any_roi |= rois_[orig_idx].use_roi();
-        batch_encoded_streams_.push_back(st.parsed_sample.encoded_stream);
+        if (!st.need_processing) {
+          st.image_info.buffer = output.raw_mutable_tensor(orig_idx);
+        }
+        nvimgcodecImage_t image = st.image.get();
+        if (image) {  // reuses the image object
+          CHECK_NVIMGCODEC(nvimgcodecImageCreate(instance_, &image, &st.image_info));
+        } else {
+          st.image = NvImageCodecImage::Create(instance_, &st.image_info);
+        }
+        if (has_roi) {
+          batch_encoded_streams_.push_back(st.sub_encoded_stream);
+        } else {
+          batch_encoded_streams_.push_back(st.parsed_sample.encoded_stream);
+        }
         batch_images_.push_back(st.image);
         decode_sample_idxs_.push_back(orig_idx);
       }
@@ -774,14 +787,14 @@ class ImageDecoder : public StatelessOperator<Backend> {
 
     // Ensure allocated memory is usable by the decoder's internal streams,
     // as we are intentionally skipping pre-sync to avoid slowing down the general case.
-    if (ws.has_stream() && any_need_processing) {
+    if (order.is_device() && any_need_processing) {
       DomainTimeRange tr("alloc sync", DomainTimeRange::kOrange);
-      CUDA_CALL(cudaStreamSynchronize(ws.stream()));
+      CUDA_CALL(cudaStreamSynchronize(order.stream()));
     }
 
     if (use_cache && nsamples_cache > 0) {
       DomainTimeRange tr("LoadDeferred", DomainTimeRange::kOrange);
-      cache_->LoadDeferred(ws.stream());
+      cache_->LoadDeferred(order.stream());
     }
 
     if (nsamples_decode > 0) {
@@ -791,7 +804,6 @@ class ImageDecoder : public StatelessOperator<Backend> {
       nvimgcodecDecodeParams_t decode_params = {NVIMGCODEC_STRUCTURE_TYPE_DECODE_PARAMS,
                                                 sizeof(nvimgcodecDecodeParams_t), nullptr};
       decode_params.apply_exif_orientation = static_cast<int>(use_orientation_);
-      decode_params.enable_roi = static_cast<int>(has_any_roi);
 
       {
         DomainTimeRange tr("nvimgcodecDecoderDecode", DomainTimeRange::kOrange);
@@ -831,13 +843,14 @@ class ImageDecoder : public StatelessOperator<Backend> {
                   auto &st = *st_ptr;
                   if constexpr (std::is_same<MixedBackend, Backend>::value) {
                     ConvertGPU(out, st.req_layout, st.req_img_type, st.decode_out_gpu,
-                               st.req_layout, st.orig_img_type, ws.stream(), ROI{},
+                               st.req_layout, st.orig_img_type, order.stream(), ROI{},
                                nvimgcodecOrientation_t{}, st.dyn_range_multiplier);
                     st.device_buf.reset();
                   } else {
                     assert(st.dyn_range_multiplier == 1.0f);  // TODO(janton): enable
                     ConvertCPU(out, st.req_layout, st.req_img_type, st.decode_out_cpu,
-                               st.req_layout, st.orig_img_type, ROI{}, nvimgcodecOrientation_t{});
+                               st.req_layout, st.orig_img_type, ROI{},
+                               nvimgcodecOrientation_t{});
                     st.host_buf.reset();
                   }
                 },
@@ -863,7 +876,7 @@ class ImageDecoder : public StatelessOperator<Backend> {
         auto src_info = input.GetMeta(orig_idx).GetSourceInfo();
         auto *out_data = output.template mutable_tensor<uint8_t>(orig_idx);
         const auto &out_shape = output.tensor_shape(orig_idx);
-        cache_->CacheStore(src_info, out_data, out_shape, ws.stream());
+        cache_->CacheStore(src_info, out_data, out_shape, order.stream());
       }
     }
   }
@@ -899,7 +912,6 @@ class ImageDecoder : public StatelessOperator<Backend> {
   int max_batch_size_ = 1;
   int num_threads_ = -1;
   ThreadPool *tp_ = nullptr;
-  int64_t task_count_ = 0;
   std::vector<std::unique_ptr<SampleState>> state_;
   std::vector<nvimgcodecCodeStream_t> batch_encoded_streams_;
   std::vector<nvimgcodecImage_t> batch_images_;
@@ -914,6 +926,8 @@ class ImageDecoder : public StatelessOperator<Backend> {
   // Manually loaded extensions
   std::vector<nvimgcodecExtensionDesc_t> extensions_descs_;
   std::vector<nvimgcodecExtension_t> extensions_;
+
+  std::vector<std::function<void(int)>> nvimgcodec_scheduled_tasks_;
 };
 
 }  // namespace imgcodec

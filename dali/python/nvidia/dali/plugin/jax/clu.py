@@ -58,18 +58,18 @@ class DALIGenericPeekableIterator(DALIGenericIterator):
                 of those names.
                 Each name should be distinct
     size : int, default = -1
-                Number of samples in the shard for the wrapped pipeline (if there is more than
-                one it is a sum)
-                Providing -1 means that the iterator will work until StopIteration is raised
-                from the inside of iter_setup(). The options `last_batch_policy` and
-                `last_batch_padded` don't work in such case. It works with only one pipeline inside
-                the iterator.
-                Mutually exclusive with `reader_name` argument
+                Number of samples in the shard. For multiple pipelines, this is the sum of
+                their shard sizes.
+                Mutually exclusive with `reader_name`. When left at -1 without
+                `reader_name`, a single-pipeline iterator reads until the pipeline raises
+                `StopIteration`, for example when an external source is exhausted;
+                `last_batch_policy` and `last_batch_padded` do not apply.
     reader_name : str, default = None
-                Name of the reader which will be queried for the shard size, number of shards and
-                all other properties necessary to count properly the number of relevant and padded
-                samples that iterator needs to deal with. It automatically sets `last_batch_padded`
-                accordingly to match the reader's configuration.
+                Name of the reader operator that determines the iterator length and
+                last-batch padding. It must match the reader's `name` argument in every
+                supplied pipeline.
+                When set, `size` and `last_batch_padded` are determined automatically and
+                must not be provided. It does not change `last_batch_policy`.
     auto_reset : string or bool, optional, default = False
                 Whether the iterator resets itself for the next epoch or it requires reset() to be
                 called explicitly.
@@ -85,15 +85,11 @@ class DALIGenericPeekableIterator(DALIGenericIterator):
                 to fully fill it. See :meth:`nvidia.dali.plugin.base_iterator.LastBatchPolicy`.
                 JAX iterator does not support LastBatchPolicy.PARTIAL
     last_batch_padded : bool, optional, default = False
-                Whether the last batch provided by DALI is padded with the last sample
-                or it just wraps up. In the conjunction with `last_batch_policy` it tells
-                if the iterator returning last batch with data only partially filled with
-                data from the current epoch is dropping padding samples or samples from
-                the next epoch. If set to ``False`` next
-                epoch will end sooner as data from it was consumed but dropped. If set to
-                True next epoch would be the same length as the first one. For this to happen,
-                the option `pad_last_batch` in the reader needs to be set to True as well.
-                It is overwritten when `reader_name` argument is provided
+                Whether the reader pads the last batch by repeating its last sample
+                (`True`) or continues into the next epoch (`False`).
+                Without `reader_name`, set this to the same value as the reader's
+                `pad_last_batch` argument. With `reader_name`, it is determined
+                automatically and must not be provided.
     prepare_first_batch : bool, optional, default = True
                 Whether DALI should buffer the first batch right after the creation of the iterator,
                 so one batch is already prepared when the iterator is prompted for the data
@@ -101,6 +97,14 @@ class DALIGenericPeekableIterator(DALIGenericIterator):
                 `jax.sharding.Sharding` compatible object that, if present, will be used to
                 build an output jax.Array for each category. If ``None``, the iterator returns
                 values compatible with pmapped JAX functions, if multiple pipelines are provided.
+    pmap_compatible : bool, optional, default = None
+                Controls whether the iterator produces outputs with a leading device axis
+                compatible with ``jax.pmap``. When ``None`` (default), it is inferred
+                automatically: ``True`` when ``devices`` is provided, ``False`` otherwise.
+                Set to ``True`` explicitly to force pmap-compatible output (shape
+                ``[num_devices, batch_per_device, ...]``) without using the ``devices``
+                argument. Set to ``False`` to suppress the device axis even when ``devices``
+                is provided.
 
     Example
     -------
@@ -133,6 +137,7 @@ class DALIGenericPeekableIterator(DALIGenericIterator):
         last_batch_policy: LastBatchPolicy = LastBatchPolicy.FILL,
         prepare_first_batch: bool = True,
         sharding: Optional[Sharding] = None,
+        pmap_compatible: Optional[bool] = None,
     ):
         super().__init__(
             pipelines,
@@ -144,6 +149,7 @@ class DALIGenericPeekableIterator(DALIGenericIterator):
             last_batch_policy,
             prepare_first_batch,
             sharding,
+            pmap_compatible,
         )
         self._mutex = threading.Lock()
         self._pool = None
@@ -294,6 +300,7 @@ def peekable_data_iterator(
     prepare_first_batch: bool = True,
     sharding: Optional[Sharding] = None,
     devices: Optional[List[jax.Device]] = None,
+    pmap_compatible: Optional[bool] = None,
 ):
     """Decorator for DALI pipelines that returns a peekable iterator. Compatible with Google CLU
     PeekableIterator. It supports peeking the next element in the iterator without advancing the
@@ -312,18 +319,18 @@ def peekable_data_iterator(
                 of those names.
                 Each name should be distinct
     size : int, default = -1
-                Number of samples in the shard for the wrapped pipeline (if there is more than
-                one it is a sum)
-                Providing -1 means that the iterator will work until StopIteration is raised
-                from the inside of iter_setup(). The options `last_batch_policy` and
-                `last_batch_padded` don't work in such case. It works with only one pipeline inside
-                the iterator.
-                Mutually exclusive with `reader_name` argument
+                Number of samples in the shard. For multiple pipelines, this is the sum of
+                their shard sizes.
+                Mutually exclusive with `reader_name`. When left at -1 without
+                `reader_name`, a single-pipeline iterator reads until the pipeline raises
+                `StopIteration`, for example when an external source is exhausted;
+                `last_batch_policy` and `last_batch_padded` do not apply.
     reader_name : str, default = None
-                Name of the reader which will be queried for the shard size, number of shards and
-                all other properties necessary to count properly the number of relevant and padded
-                samples that iterator needs to deal with. It automatically sets `last_batch_padded`
-                accordingly to match the reader's configuration.
+                Name of the reader operator that determines the iterator length and
+                last-batch padding. It must match the reader's `name` argument in every
+                supplied pipeline.
+                When set, `size` and `last_batch_padded` are determined automatically and
+                must not be provided. It does not change `last_batch_policy`.
     auto_reset : string or bool, optional, default = False
                 Whether the iterator resets itself for the next epoch or it requires reset() to be
                 called explicitly.
@@ -339,15 +346,11 @@ def peekable_data_iterator(
                 to fully fill it. See :meth:`nvidia.dali.plugin.base_iterator.LastBatchPolicy`.
                 JAX iterator does not support LastBatchPolicy.PARTIAL
     last_batch_padded : bool, optional, default = False
-                Whether the last batch provided by DALI is padded with the last sample
-                or it just wraps up. In the conjunction with `last_batch_policy` it tells
-                if the iterator returning last batch with data only partially filled with
-                data from the current epoch is dropping padding samples or samples from
-                the next epoch. If set to ``False`` next
-                epoch will end sooner as data from it was consumed but dropped. If set to
-                True next epoch would be the same length as the first one. For this to happen,
-                the option `pad_last_batch` in the reader needs to be set to True as well.
-                It is overwritten when `reader_name` argument is provided
+                Whether the reader pads the last batch by repeating its last sample
+                (`True`) or continues into the next epoch (`False`).
+                Without `reader_name`, set this to the same value as the reader's
+                `pad_last_batch` argument. With `reader_name`, it is determined
+                automatically and must not be provided.
     prepare_first_batch : bool, optional, default = True
                 Whether DALI should buffer the first batch right after the creation of the iterator,
                 so one batch is already prepared when the iterator is prompted for the data
@@ -362,6 +365,14 @@ def peekable_data_iterator(
                 return outputs compatible with pmapped JAX functions.
                 This argument is  mutually exclusive with `sharding` argument. If `sharding`
                 is provided, `devices` should be set to None.
+    pmap_compatible : bool, optional, default = None
+                Controls whether the iterator produces outputs with a leading device axis
+                compatible with ``jax.pmap``. When ``None`` (default), it is inferred
+                automatically: ``True`` when ``devices`` is provided, ``False`` otherwise.
+                Set to ``True`` explicitly to force pmap-compatible output (shape
+                ``[num_devices, batch_per_device, ...]``) without using the ``devices``
+                argument. Set to ``False`` to suppress the device axis even when ``devices``
+                is provided.
     checkpoints : list of str, optional, default = None
                 Checkpoints obtained with `.checkpoints()` method of the iterator.
                 If provided, they will be used to restore the state of the pipelines.
@@ -397,4 +408,5 @@ def peekable_data_iterator(
         prepare_first_batch,
         sharding,
         devices,
+        pmap_compatible,
     )

@@ -1,4 +1,4 @@
-// Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -50,6 +50,10 @@ void FramesDecoderCpu::Flush() {
 
 bool FramesDecoderCpu::ReadNextFrame(uint8_t *data) {
   LOG_LINE << "FramesDecoderCpu::ReadNextFrame: next_frame_idx_=" << next_frame_idx_ << std::endl;
+  if (next_frame_idx_ == 0) {
+    // call NumFrames() to populate the index before any frames are read
+    NumFrames();
+  }
   // No more frames in the file
   if (next_frame_idx_ == -1) {
     return false;
@@ -74,10 +78,15 @@ void PlanarToInterleaved(uint8_t *output, const uint8_t *input, int64_t height, 
 void FramesDecoderCpu::CopyToOutput(uint8_t *data) {
   uint8_t *sws_output_data = data;
   AVPixelFormat sws_output_format = AV_PIX_FMT_RGB24;
-  if (image_type_ == DALI_YCbCr) {
-    tmp_buffer_.resize(FrameSize());
+  if (image_type_ == DALI_YCbCr || Width() % 32) {
+    // in some cases, when Width() % 32, sws_scale go past the provided memory for
+    // conversion output, so we need the memory allocated with extra padding
+    auto extra_padding = 32;
+    tmp_buffer_.resize(FrameSize() + extra_padding);
     sws_output_data = tmp_buffer_.data();
-    sws_output_format = AV_PIX_FMT_YUV444P;
+    if (image_type_ == DALI_YCbCr) {
+      sws_output_format = AV_PIX_FMT_YUV444P;
+    }
   }
   if (!sws_ctx_) {
     sws_ctx_ = std::unique_ptr<SwsContext, decltype(&sws_freeContext)>(
@@ -88,12 +97,30 @@ void FramesDecoderCpu::CopyToOutput(uint8_t *data) {
         Width(),
         Height(),
         sws_output_format,
-        SWS_BILINEAR,
+        SWS_BILINEAR|SWS_FULL_CHR_H_INT|SWS_ACCURATE_RND,
         nullptr,
         nullptr,
         nullptr),
       sws_freeContext);
     DALI_ENFORCE(sws_ctx_, "Could not create sw context");
+  }
+  bool src_full_range = frame_->color_range == AVCOL_RANGE_JPEG ||
+                        (frame_->color_range == AVCOL_RANGE_UNSPECIFIED &&
+                         codec_params_->color_range == AVCOL_RANGE_JPEG);
+  if (sws_src_full_range_ != src_full_range) {
+    int ret = sws_setColorspaceDetails(
+      sws_ctx_.get(),
+      sws_getCoefficients(SWS_CS_DEFAULT),
+      src_full_range,
+      sws_getCoefficients(SWS_CS_DEFAULT),
+      1,
+      0,
+      1 << 16,
+      1 << 16);
+    DALI_ENFORCE(ret >= 0,
+                 make_string("Could not set color space conversion details: ",
+                             av_error_string(ret)));
+    sws_src_full_range_ = src_full_range;
   }
 
   uint8_t *dest[4] = {sws_output_data, nullptr, nullptr, nullptr};
@@ -112,6 +139,8 @@ void FramesDecoderCpu::CopyToOutput(uint8_t *data) {
   if (image_type_ == DALI_YCbCr) {
     LOG_LINE << "Converting planar YUV to interleaved" << std::endl;
     PlanarToInterleaved(data, sws_output_data, Height(), Width(), Channels());
+  } else if (Width() % 32) {
+    std::copy(sws_output_data, sws_output_data + FrameSize(), data);
   }
 
   DALI_ENFORCE(ret >= 0,
@@ -147,19 +176,21 @@ bool FramesDecoderCpu::ReadRegularFrame(uint8_t *data) {
     LOG_LINE << (copy_to_output ? "Read" : "Skip") << " frame (ReadRegularFrame), index "
              << next_frame_idx_ << ", timestamp " << std::setw(5) << frame_->pts
              << std::endl;
-    if (!copy_to_output) {
-      ++next_frame_idx_;
-      return true;
+    if (copy_to_output) {
+      CopyToOutput(data);
     }
-
-    CopyToOutput(data);
     ++next_frame_idx_;
+    if (next_frame_idx_ >= NumFrames()) {
+      next_frame_idx_ = -1;
+      LOG_LINE << "Next frame index out of bounds (regular), setting to -1" << std::endl;
+    }
     return true;
   }
 
   ret = avcodec_send_packet(codec_ctx_, nullptr);
-  DALI_ENFORCE(ret >= 0,
-               make_string("Failed to send packet to decoder: ", av_error_string(ret)));
+  // the decoder has already drained — no more packets to send
+  DALI_ENFORCE(ret >= 0 || ret == AVERROR_EOF,
+               make_string("avcodec_send_packet failed: ", av_error_string(ret)));
   flush_state_ = true;
 
   return false;
@@ -169,6 +200,7 @@ bool FramesDecoderCpu::ReadFlushFrame(uint8_t *data) {
   bool copy_to_output = data != nullptr;
   if (avcodec_receive_frame(codec_ctx_, frame_) < 0) {
     flush_state_ = false;
+    next_frame_idx_ = -1;
     return false;
   }
 
@@ -182,7 +214,7 @@ bool FramesDecoderCpu::ReadFlushFrame(uint8_t *data) {
   ++next_frame_idx_;
 
   // TODO(awolant): Figure out how to handle this during index building
-  // Or when NumFrames in unavailible
+  // Or when NumFrames in unavailable
   if (next_frame_idx_ >= NumFrames()) {
     next_frame_idx_ = -1;
     LOG_LINE << "Next frame index out of bounds, setting to -1" << std::endl;
@@ -206,15 +238,15 @@ bool FramesDecoderCpu::SelectVideoStream(int stream_id) {
   assert(codec_params_);
   AVCodecID codec_id = codec_params_->codec_id;
 
-  static constexpr std::array<AVCodecID, 7> codecs = {
-    AVCodecID::AV_CODEC_ID_H264,
-    AVCodecID::AV_CODEC_ID_HEVC,
+  static constexpr std::array<AVCodecID, 3> codecs = {
     AVCodecID::AV_CODEC_ID_VP8,
     AVCodecID::AV_CODEC_ID_VP9,
     AVCodecID::AV_CODEC_ID_MJPEG,
     // Those are not supported by our compiled version of libavcodec,
     // AVCodecID::AV_CODEC_ID_AV1,
     // AVCodecID::AV_CODEC_ID_MPEG4,
+    // AVCodecID::AV_CODEC_ID_H264,
+    // AVCodecID::AV_CODEC_ID_HEVC,
   };
 
   if (std::find(codecs.begin(), codecs.end(), codec_id) == codecs.end()) {

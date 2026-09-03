@@ -1,4 +1,4 @@
-# Copyright (c) 2019-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2019-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ import nvidia.dali.types as dali_types
 from nvidia.dali.backend_impl import TensorListCPU
 from nvidia.dali import plugin_manager
 
+import ctypes
 import functools
 import inspect
 import os
@@ -28,7 +29,6 @@ import sys
 import tempfile
 from packaging.version import Version
 from nose_utils import SkipTest
-
 
 is_of_supported_var = None
 
@@ -257,6 +257,7 @@ def check_batch(
     max_allowed_error=None,
     expected_layout=None,
     compare_layouts=True,
+    dump_artifacts=True,
 ):
     """Compare two batches of data, be it dali TensorList or list of numpy arrays.
 
@@ -357,7 +358,8 @@ def check_batch(
                 filename = (
                     batch1[i].source_info() if hasattr(batch1[i], "source_info") else f"unknown{i}"
                 )
-                dump_as_core_artifacts(filename, left, right, sample_idx=i)
+                if dump_artifacts:
+                    dump_as_core_artifacts(filename, left, right, sample_idx=i)
                 assert False, error_msg
 
 
@@ -370,6 +372,7 @@ def compare_pipelines(
     max_allowed_error=None,
     expected_layout=None,
     compare_layouts=True,
+    dump_artifacts=True,
 ):
     """Compare the outputs of two pipelines across several iterations.
 
@@ -403,6 +406,7 @@ def compare_pipelines(
                 max_allowed_error,
                 expected_layout=current_expected_layout,
                 compare_layouts=compare_layouts,
+                dump_artifacts=dump_artifacts,
             )
 
 
@@ -955,12 +959,15 @@ def check_numba_compatibility_cpu(if_skip=True):
         return True
 
 
-def check_numba_compatibility_gpu(if_skip=True):
-    import nvidia.dali.plugin.numba.experimental as ex
+def check_numba_compatibility_gpu(if_skip=True, use_experimental: bool = False):
+    if use_experimental:
+        from nvidia.dali.plugin.numba.experimental import NumbaFunction
+    else:
+        from nvidia.dali.plugin.numba import NumbaFunction
 
-    if not ex.NumbaFunction._check_minimal_numba_version(
+    if not NumbaFunction._check_minimal_numba_version(
         False
-    ) or not ex.NumbaFunction._check_cuda_compatibility(False):
+    ) or not NumbaFunction._check_cuda_compatibility(False):
         if if_skip:
             raise SkipTest()
         else:
@@ -969,23 +976,64 @@ def check_numba_compatibility_gpu(if_skip=True):
         return True
 
 
-def create_sign_off_decorator():
-    _tested_ops = []
+def create_sign_off_registry():
+    """
+    Creates a registry for tracking which operators have been tested.
+
+    Returns a SignOff instance that can be used in two ways:
+    1. As a decorator to mark tests: @sign_off("operator_name")
+    2. As a direct registration call inside tests: sign_off.register_test("operator_name")
+
+    Both patterns add operators to the same registry, which can be queried
+    via the `tested_ops` property.
+
+    Returns:
+        SignOff: An instance with methods for registering tested operators.
+
+    Example usage:
+        # Create a registry instance
+        sign_off = create_sign_off_registry()
+
+        # Pattern 1: Decorator style
+        @sign_off("operators.add", "operators.subtract")
+        def test_arithmetic_ops():
+            # Test implementation
+
+        # Pattern 2: Direct registration inside test
+        def test_conditional_ops():
+            sign_off.register_test("operators.multiply")
+           # Test implementation
+
+        # Check which operators were tested
+        print(sign_off.tested_ops)
+        # Output: {'operators.add', 'operators.subtract', 'operators.multiply'}
+
+    Note:
+        Each call to create_sign_off_registry() creates an independent registry
+        with its own operator tracking. Multiple references to the same instance
+        share the same registry.
+    """
+    _tested_ops = set()
 
     class SignOff:
         def __call__(self, *op_names):
-            assert all(isinstance(op_name, str) for op_name in op_names)
-            assert len(op_names)
-            _tested_ops.extend(op_names)
+            """Use as decorator: @sign_off("operator_name")"""
+            self.register_test(*op_names)
 
             def dummy(fn):
                 return fn
 
             return dummy
 
+        def register_test(self, *op_names):
+            """Use directly in test: sign_off.register_test("operator_name")"""
+            assert all(isinstance(op_name, str) for op_name in op_names)
+            assert len(op_names)
+            _tested_ops.update(op_names)
+
         @property
         def tested_ops(self):
-            return set(_tested_ops)
+            return _tested_ops
 
     return SignOff()
 
@@ -1020,3 +1068,33 @@ def is_of_supported(device_id=0):
         platform.machine() == "x86_64" or driver_version_major < 495
     )
     return is_of_supported_var
+
+
+def get_nvjpeg_ver():
+    nvjpeg_ver_major, nvjpeg_ver_minor, nvjpeg_ver_patch = (
+        ctypes.c_int(),
+        ctypes.c_int(),
+        ctypes.c_int(),
+    )
+    try:
+        nvjpeg_libname = "libnvjpeg.so"
+        nvjpeg_lib = ctypes.CDLL(nvjpeg_libname)
+        nvjpeg_lib.nvjpegGetProperty(0, ctypes.byref(nvjpeg_ver_major))
+        nvjpeg_lib.nvjpegGetProperty(1, ctypes.byref(nvjpeg_ver_minor))
+        nvjpeg_lib.nvjpegGetProperty(2, ctypes.byref(nvjpeg_ver_patch))
+    except Exception:
+        cuda_root = os.environ.get("CUDA_PATH") or os.environ.get("CUDA_HOME") or "/usr/local/cuda"
+        cuda_lib_dir = os.path.join(cuda_root, "lib64")
+        if not os.path.isdir(cuda_lib_dir):
+            return nvjpeg_ver_major.value, nvjpeg_ver_minor.value, nvjpeg_ver_patch.value
+        for file in os.listdir(cuda_lib_dir):
+            try:
+                if file.startswith("libnvjpeg.so"):
+                    nvjpeg_lib = ctypes.CDLL(os.path.join(cuda_lib_dir, file))
+                    nvjpeg_lib.nvjpegGetProperty(0, ctypes.byref(nvjpeg_ver_major))
+                    nvjpeg_lib.nvjpegGetProperty(1, ctypes.byref(nvjpeg_ver_minor))
+                    nvjpeg_lib.nvjpegGetProperty(2, ctypes.byref(nvjpeg_ver_patch))
+                    break
+            except Exception:
+                continue
+    return nvjpeg_ver_major.value, nvjpeg_ver_minor.value, nvjpeg_ver_patch.value

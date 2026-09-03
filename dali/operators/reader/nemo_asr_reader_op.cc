@@ -1,4 +1,4 @@
-// Copyright (c) 2020-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2020-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -86,6 +86,22 @@ This reader produces between 1 and 3 outputs:
   .AddOptionalArg("shuffle_after_epoch",
     "If true, reader shuffles whole dataset after each epoch",
     false)
+  .AddOptionalArg<int64_t>("shuffle_after_epoch_seed",
+    R"code(Random seed for the dataset shuffling performed after each epoch.
+
+If not provided, a fixed default seed is used, which results in the same shuffling
+pattern across different training runs. Providing a custom seed allows for different
+shuffle patterns across training runs, which may be desirable for better statistical
+properties.
+
+.. note::
+    When using multiple DALI pipelines (e.g., for multi-GPU training), all pipeline
+    instances should use the same `shuffle_after_epoch_seed` to ensure a consistent
+    global shuffle across all shards.
+
+.. note::
+    This argument has no effect unless `shuffle_after_epoch` is set to ``True``.)code",
+    nullptr, false)
   .AddOptionalArg("sample_rate",
     "If specified, the target sample rate, in Hz, to which the audio is resampled.",
     -1.0f)
@@ -116,7 +132,7 @@ in seconds, of the audio samples.
 Samples with a duration longer than this value will be ignored.)code",
     0.0f)
   .AddOptionalArg<bool>("normalize_text", "Normalize text.", nullptr)
-  .DeprecateArg("normalize_text")  // deprecated since 0.28dev
+  .DeprecateArg("normalize_text", "0.28")
   .AdditionalOutputsFn(NemoAsrReaderOutputFn)
   .AddParent("LoaderBase");
 
@@ -130,12 +146,13 @@ DALI_SCHEMA(NemoAsrReader)
     .DocStr("Legacy alias for :meth:`readers.nemo_asr`.")
     .AdditionalOutputsFn(NemoAsrReaderOutputFn)
     .AddParent("readers__NemoAsr")
-    .MakeDocPartiallyHidden()
+    .MakeDocHidden()
     .Deprecate(
+        "1.0",
         "readers__NemoAsr",
         R"code(In DALI 1.0 all readers were moved into a dedicated :mod:`~nvidia.dali.fn.readers`
 submodule and renamed to follow a common pattern. This is a placeholder operator with identical
-functionality to allow for backward compatibility.)code");  // Deprecated in 1.0;
+functionality to allow for backward compatibility.)code");
 
 NemoAsrReader::NemoAsrReader(const OpSpec& spec)
     : DataReader<CPUBackend, AsrSample, AsrSample, true>(spec),

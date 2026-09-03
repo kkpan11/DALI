@@ -1,4 +1,4 @@
-// Copyright (c) 2019-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2019-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -40,13 +40,13 @@ Normalization takes the input images and produces the output by using the follow
   .AllowSequences()
   .SupportVolumetric()
   .AddOptionalArg<DALIImageType>("image_type", "Image type", nullptr)
-  .DeprecateArg("image_type")  // deprecated since 0.24dev
+  .DeprecateArg("image_type", "0.24")
   .AddOptionalTypeArg("dtype",
        R"code(Output data type.
 
 Supported types: ``FLOAT``, ``FLOAT16``, ``INT8``, ``UINT8``.
 )code", DALI_FLOAT)
-  .DeprecateArgInFavorOf("output_dtype", "dtype")  // deprecated since 0.24dev
+  .DeprecateArgInFavorOf("output_dtype", "dtype", "0.24")
   .AddOptionalArg("output_layout",
     R"code(Tensor data layout for the output.)code", TensorLayout("CHW"))
   .AddOptionalArg("pad_output",
@@ -71,7 +71,14 @@ This argument is useful when using integer outputs to improve dynamic range util
 This argument is useful when using unsigned integer outputs to improve dynamic range utilization.)",
     0.0f)
   .AddParent("CropAttr")
-  .AddParent("OutOfBoundsAttr");
+  .AddParent("OutOfBoundsAttr")
+  .OutputLayout(0, [](const OpSpec &spec)->std::optional<TensorLayout> {
+    auto layout = spec.GetArgument<TensorLayout>("output_layout");
+    if (layout == "")
+      return spec.InputDesc(0).layout;
+    else
+      return layout;
+  });
 
 DALI_REGISTER_OPERATOR(CropMirrorNormalize, CropMirrorNormalize<CPUBackend>, CPU);
 

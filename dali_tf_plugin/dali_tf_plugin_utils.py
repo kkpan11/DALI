@@ -58,9 +58,15 @@ def get_tf_compiler_version():
     cmd = ["strings", "-a", lib]
     process_strings = subprocess.Popen(cmd, stdout=subprocess.PIPE)  # nosec B603
     cmd = ["grep", "GCC: ("]
-    s = str(subprocess.check_output(cmd, stdin=process_strings.stdout, shell=False))  # nosec B603
+    s = subprocess.run(  # nosec B603
+        cmd,
+        stdin=process_strings.stdout,
+        shell=False,
+        check=False,
+        stdout=subprocess.PIPE,
+    ).stdout.decode("utf-8")
     process_strings.stdout.close()
-    lines = s.split("\\n")
+    lines = s.split("\n")
     ret_ver = ""
     for line in lines:
         res = re.search(r"GCC:\s*\(.*\)\s*(\d+.\d+).\d+", line)
@@ -76,17 +82,22 @@ def get_tf_compiler_version():
 
 def get_tf_version():
     try:
-        import pkg_resources
+        import tensorflow as tf
 
-        s = pkg_resources.get_distribution("tensorflow-gpu").version
-    except pkg_resources.DistributionNotFound:
-        # pkg_resources.get_distribution doesn't work well with conda installed packages
-        try:
-            import tensorflow as tf
-
-            s = tf.__version__
-        except ModuleNotFoundError:
-            return ""
+        s = tf.__version__
+    except ModuleNotFoundError:
+        print(
+            "\n----------------------------------------------------------------------------------\n"
+        )
+        print(
+            "!!!Pip version is 25.3 or higher enabled build isolation by default while the "
+            "plugin requires no build isolation. Please pass the --no-build-isolation "
+            "flag to pip install if that is the case!!!"
+        )
+        print(
+            "\n----------------------------------------------------------------------------------\n"
+        )
+        return ""
     version = re.search(r"(\d+.\d+).\d+", s).group(1)
     return version
 

@@ -1,4 +1,4 @@
-// Copyright (c) 2017-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2017-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -32,6 +32,7 @@
 #include "dali/pipeline/operator/name_utils.h"
 #include "dali/pipeline/graph/graph2dot.h"
 #include "dali/pipeline/graph/cse.h"
+#include "dali/pipeline/graph/node_meta.h"
 #include "dali/pipeline/operator/builtin/input_operator.h"
 
 #ifdef DALI_DEBUG_SERIALIZE
@@ -242,7 +243,7 @@ Pipeline::~Pipeline() {
 
 PipelineParams Pipeline::DefaultParams() {
   PipelineParams params{};
-  params.executor_type = ExecutorType::AsyncPipelined;
+  params.executor_type = ExecutorType::Dynamic;
   params.executor_flags = ExecutorFlags::ConcurrencyBackend;
   params.prefetch_queue_depths = QueueSizes{2};
   params.enable_checkpointing = false;
@@ -356,6 +357,23 @@ int Pipeline::AddOperator(const OpSpec &const_spec, std::string_view inst_name, 
   return result;
 }
 
+int Pipeline::AddOperatorInstance(const OpSpec &spec,
+                                  std::string_view inst_name,
+                                  std::unique_ptr<OperatorBase> op,
+                                  int logical_id) {
+  DALI_ENFORCE(op);
+  DALI_ENFORCE(op->GetSpec().SchemaName() == spec.SchemaName());
+  int result = AddOperator(spec, inst_name, logical_id);
+  transferred_ops_.emplace(std::string(inst_name), std::move(op));
+  return result;
+}
+
+int Pipeline::AddOperatorInstance(const OpSpec &spec,
+                                  std::string_view inst_name,
+                                  std::unique_ptr<OperatorBase> op) {
+  return AddOperatorInstance(spec, inst_name, std::move(op), GetNextLogicalId());
+}
+
 int Pipeline::AddOperatorImpl(const OpSpec &const_spec,
                               std::string_view inst_name,
                               int logical_id) {
@@ -428,9 +446,12 @@ int Pipeline::AddOperatorImpl(const OpSpec &const_spec,
     std::string input_name = spec.InputName(input_idx);
     auto it = edge_names_.find(input_name);
 
-    // TODO(michalz): This is a bit ugly, but it provides a nice and generic error message.
-    //                In the long run, we should probably allow GPU named inputs and then
-    //                the check should be done based on the schema, without a universal ToCPU.
+    // TODO(michalz): This enables passing GPU data nodes as argument inputs, with a silent copy.
+    //                When GPU argument inputs are allowed, we should decide whether to copy or not
+    //                based on the schema.
+    // This call is necessary because  `.cpu()` and `.gpu()` don't actually create a copy node
+    // and `op(gpu_op_result.cpu())` doesn't work wihtout this copy.
+    // The backend check must happen in Python.
     if (dynamic_execution())
       ToCPU(it);
 
@@ -632,7 +653,8 @@ void Pipeline::Build(std::vector<PipelineOutputDesc> output_descs) {
     const string &inst_name = name_op_spec.instance_name;
     OpSpec op_spec = name_op_spec.spec;
     try {
-      PrepareOpSpec(&op_spec, name_op_spec.logical_id);
+      if (!transferred_ops_.count(inst_name))
+        PrepareOpSpec(&op_spec, name_op_spec.logical_id);
       graph_builder_.Add(inst_name, op_spec);
     } catch (...) {
       PropagateError({std::current_exception(),
@@ -656,8 +678,10 @@ void Pipeline::Build(std::vector<PipelineOutputDesc> output_descs) {
   if (IsCSEEnabled())
     graph::EliminateCommonSubgraphs(graph_);
 
+  graph::ComputeDataNodeMetadata(graph_);
+
   // Load the final graph into the executor
-  executor_->Build(graph_);
+  executor_->Build(graph_, std::move(transferred_ops_));
   // CAUTION: Do not insert anything that can throw between `executor_->Build()` and
   //          `DiscoverInputOperators`.
   DiscoverInputOperators();
@@ -1206,6 +1230,9 @@ void Pipeline::RepeatLastInputs::FindNodes(const graph::OpGraph &graph, Executor
       mixed_nodes_[node.instance_name] = { &node, dynamic_cast<Operator<MixedBackend>*>(op) };
     else
       assert(!"Unexpected backend for an ExternalSource node.");
+  }
+  if (!gpu_nodes_.empty()) {
+    set_last_stream_ = CUDAStreamPool::instance().Get();
   }
 }
 

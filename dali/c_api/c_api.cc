@@ -23,6 +23,7 @@
 #include "dali/core/format.h"
 #include "dali/core/tensor_shape.h"
 #include "dali/core/mm/default_resources.h"
+#include "dali/core/nvtx.h"
 #include "dali/pipeline/init.h"
 
 #include "dali/pipeline/pipeline.h"
@@ -639,16 +640,23 @@ void daliOutputCopy(daliPipelineHandle_t pipe_handle, void *dst, int output_idx,
   AccessOrder wait_order = AccessOrder::host();
   AccessOrder copy_order = AccessOrder::host();
 
+  std::optional<int> dst_dev_id;
+  if (dst_type == GPU) {
+    if (stream != 0 && stream != cudaStreamLegacy && stream != cudaStreamPerThread) {
+      dst_dev_id = dali::DeviceFromStream(stream);
+    }
+  }
+
   if (ws->OutputIsType<CPUBackend>(output_idx)) {
-    copy_order = is_pinned ? AccessOrder(stream) : AccessOrder::host();
+    copy_order = dst_type == GPU ? AccessOrder(stream) : AccessOrder::host();
     auto &src = ws->Output<CPUBackend>(output_idx);
-    CopyToExternal(dst, dst_mem_kind, src, copy_order, use_copy_kernel);
+    CopyToExternal(dst, dst_mem_kind, dst_dev_id, src, copy_order, use_copy_kernel);
     if (!host_sync)
       wait_order = src.order();  // if the copy order is host, then wait will be no-op
   } else {
     auto &src = ws->Output<GPUBackend>(output_idx);
     copy_order = stream;
-    CopyToExternal(dst, dst_mem_kind, src, copy_order, use_copy_kernel);
+    CopyToExternal(dst, dst_mem_kind, dst_dev_id, src, copy_order, use_copy_kernel);
     if (!host_sync)
       wait_order = src.order();
   }
@@ -670,16 +678,23 @@ void daliOutputCopySamples(daliPipelineHandle_t pipe_handle, void **dsts, int ou
   AccessOrder wait_order = AccessOrder::host();
   AccessOrder copy_order = AccessOrder::host();
 
+  std::optional<int> dst_dev_id;
+  if (dst_type == GPU) {
+    if (stream != 0 && stream != cudaStreamLegacy && stream != cudaStreamPerThread) {
+      dst_dev_id = dali::DeviceFromStream(stream);
+    }
+  }
+
   if (ws->OutputIsType<CPUBackend>(output_idx)) {
-    copy_order = is_pinned ? AccessOrder(stream) : AccessOrder::host();
+    copy_order = dst_type == GPU ? AccessOrder(stream) : AccessOrder::host();
     auto & src = ws->Output<CPUBackend>(output_idx);
-    CopyToExternal(dsts, dst_mem_kind, src, copy_order, use_copy_kernel);
+    CopyToExternal(dsts, dst_mem_kind, dst_dev_id, src, copy_order, use_copy_kernel);
     if (!host_sync)
       wait_order = src.order();  // if the copy order is host, then wait will be no-op
   } else {
     auto &src = ws->Output<GPUBackend>(output_idx);
     copy_order = stream;
-    CopyToExternal(dsts, dst_mem_kind, src, copy_order, use_copy_kernel);
+    CopyToExternal(dsts, dst_mem_kind, dst_dev_id, src, copy_order, use_copy_kernel);
     if (!host_sync)
       wait_order = src.order();
   }
@@ -891,4 +906,3 @@ void daliDestroyExternalContextCheckpoint(daliExternalContextCheckpoint *externa
   if (external_context->pipeline_data.data) daliFree(external_context->pipeline_data.data);
   if (external_context->iterator_data.data) daliFree(external_context->iterator_data.data);
 }
-

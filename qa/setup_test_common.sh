@@ -6,6 +6,9 @@ CUDA_VERSION_MAJOR=${CUDA_VERSION:0:2}
 
 PYTHON_VERSION=$(python -c "import sys; print(\"{}.{}\".format(sys.version_info[0],sys.version_info[1]))")
 PYTHON_VERSION_SHORT=${PYTHON_VERSION/\./}
+if python3 -c "import sysconfig; exit(not sysconfig.get_config_var('Py_GIL_DISABLED'))"; then
+  PYTHON_VERSION_SHORT="${PYTHON_VERSION_SHORT}t"
+fi
 
 NVIDIA_SMI_DRIVER_VERSION=$(nvidia-smi | grep -Po '(?<=Driver Version: )\d+.\d+') || true
 
@@ -40,6 +43,11 @@ version_eq "$DALI_CUDA_MAJOR_VERSION" "12" && \
 test "$NVIDIA_SMI_DRIVER_VERSION" != "" && \
 version_lt "$NVIDIA_SMI_DRIVER_VERSION" "525.0" && \
 export LD_LIBRARY_PATH="/usr/local/cuda-12.0/compat:$LD_LIBRARY_PATH"
+
+version_eq "$DALI_CUDA_MAJOR_VERSION" "13" && \
+test "$NVIDIA_SMI_DRIVER_VERSION" != "" && \
+version_lt "$NVIDIA_SMI_DRIVER_VERSION" "580.0" && \
+export LD_LIBRARY_PATH="/usr/local/cuda-13.0/compat:$LD_LIBRARY_PATH"
 
 echo "LD_LIBRARY_PATH is $LD_LIBRARY_PATH"
 
@@ -92,4 +100,23 @@ enable_virtualenv() {
 disable_virtualenv() {
     echo "Deactivate virtual env"
     deactivate
+}
+
+install_cuda_compat() {
+    if [ "${DALI_CUDA_MAJOR_VERSION}" == "13" ] && [ "${CUDA_VERSION}" != "130" ]; then
+        ARCH=$(uname -m)
+        if [ "$ARCH" == "x86_64" ]; then
+            REPO_ARCH="x86_64"
+        elif [ "$ARCH" == "aarch64" ]; then
+            REPO_ARCH="sbsa"
+        else
+            echo "Unsupported architecture: $ARCH"
+            exit 1
+        fi
+        apt-get update && \
+        apt-get install software-properties-common -y --no-install-recommends && \
+        apt-key adv --fetch-keys https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/${REPO_ARCH}/3bf863cc.pub && \
+        add-apt-repository "deb https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/${REPO_ARCH}/ /" && \
+        apt update && apt install -y cuda-compat-13-0
+    fi
 }

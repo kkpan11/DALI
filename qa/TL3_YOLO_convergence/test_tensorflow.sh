@@ -4,6 +4,11 @@ function CLEAN_AND_EXIT {
     exit $1
 }
 
+# enable compat for CUDA 13 if the test image doesn't support it yet
+source <(echo "set -x"; cat ../setup_test_common.sh; echo "set +x")
+
+install_cuda_compat
+
 cd /opt/dali/docs/examples/use_cases/tensorflow/yolov4
 
 apt update && apt install python3-opencv -y
@@ -21,7 +26,7 @@ export IS_TMP_DIR=0
 if [ ! -f "/data/coco/coco-2017/coco2017/train2017/000000581929.jpg" ] && [ -f "/data/coco/coco-2017/coco2017/train2017.zip" ]; then
     export DATA_DIR=$(mktemp -d)
     export IS_TMP_DIR=1
-    cd ${DATA_DIR}
+    pushd ${DATA_DIR}
     cp /data/coco/coco-2017/coco2017/train2017.zip . &
     cp /data/coco/coco-2017/coco2017/val2017.zip . &
     cp /data/coco/coco-2017/coco2017/annotations_trainval2017.zip . &
@@ -29,6 +34,8 @@ if [ ! -f "/data/coco/coco-2017/coco2017/train2017/000000581929.jpg" ] && [ -f "
     unzip -q train2017.zip &
     unzip -q val2017.zip &
     unzip -q annotations_trainval2017.zip &
+    wait
+    popd
 fi
 
 python src/main.py train \

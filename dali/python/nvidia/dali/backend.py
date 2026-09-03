@@ -1,4 +1,4 @@
-# Copyright (c) 2017-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2017-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,7 +18,6 @@ from nvidia.dali.backend_impl import (
     GetCudaVersion,
     GetCufftVersion,
     GetNppVersion,
-    GetNvjpegVersion,
 )
 
 # Re-expose some private symbols not imported with `import *`
@@ -35,21 +34,27 @@ from nvidia.dali.backend_impl import *  # noqa: F401, F403
 from . import __cuda_version__
 import warnings
 import sys
-
+import sysconfig
+import atexit
+import gc
 
 _ExecutorType.__bool__ = lambda self: self.value != 0
 _ExecutorType.__and__ = lambda x, y: _ExecutorType(x.value & y.value)
 _ExecutorType.__or__ = lambda x, y: _ExecutorType(x.value | y.value)
+_ExecutorType.__xor__ = lambda x, y: _ExecutorType(x.value ^ y.value)
+_ExecutorType.__invert__ = lambda x: _ExecutorType(~x.value)
 
 _ExecutorFlags.__bool__ = lambda self: self.value != 0
 _ExecutorFlags.__and__ = lambda x, y: _ExecutorFlags(x.value & y.value)
 _ExecutorFlags.__or__ = lambda x, y: _ExecutorFlags(x.value | y.value)
+_ExecutorFlags.__xor__ = lambda x, y: _ExecutorFlags(x.value ^ y.value)
+_ExecutorFlags.__invert__ = lambda x: _ExecutorFlags(~x.value)
 
 
 def deprecation_warning(what):
-    # show only this warning
+    # show by default, but honor warning filters configured by the user
     with warnings.catch_warnings():
-        warnings.simplefilter("default")
+        warnings.simplefilter("default", append=True)
         warnings.warn(what, Warning, stacklevel=2)
 
 
@@ -79,9 +84,26 @@ if not initialized:
             "Please update your environment to use Python 3.9, "
             "or newer."
         )
-    # py3.13 warning
-    if sys.version_info[0] == 3 and sys.version_info[1] == 13:
-        deprecation_warning("Python 3.13 support is experimental and not officially tested.")
+    # py3.9 warning
+    if sys.version_info[0] == 3 and sys.version_info[1] == 9:
+        deprecation_warning(
+            "DALI 1.53 is the last release to support Python 3.9 "
+            "Please update your environment to use Python 3.10, "
+            "or newer."
+        )
+    # py3.13t warning
+    if (
+        sys.version_info[0] == 3
+        and sys.version_info[1] == 13
+        and sysconfig.get_config_var("Py_GIL_DISABLED") == 1
+    ):
+        deprecation_warning(
+            "Python 3.13t is experimental and DALI is not officially tested with it. "
+            "The free-threaded build is officially supported as of Python 3.14t. See PEP 779."
+        )
+    # py3.15 warning
+    if sys.version_info[0] == 3 and sys.version_info[1] == 15:
+        deprecation_warning("Python 3.15 support is experimental and not officially tested.")
 
     if int(str(__cuda_version__)[:2]) < 11:
         deprecation_warning(
@@ -94,7 +116,7 @@ cuda_checked = False
 
 def check_cuda_runtime():
     """
-    Checks the availability of CUDA runtime/GPU, and NPP, nvJPEG, and cuFFT libraries and prints an
+    Checks the availability of CUDA runtime/GPU, and NPP, and cuFFT libraries and prints an
     appropriate warning.
     """
     global cuda_checked
@@ -125,13 +147,7 @@ def check_cuda_runtime():
                 "for the reference."
             )
 
-        if GetNvjpegVersion() == -1:
-            deprecation_warning(
-                "nvidia-dali-cuda120 is no longer shipped with CUDA runtime. "
-                "You need to install it separately. nvJPEG is typically "
-                "provided with CUDA Toolkit installation or an appropriate wheel. "
-                "Please check "
-                "https://docs.nvidia.com/cuda/cuda-quick-start-guide/index.html"
-                "#pip-wheels-installation-linux "
-                "for the reference."
-            )
+
+@atexit.register
+def _unload_dali():
+    gc.collect()

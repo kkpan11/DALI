@@ -1,4 +1,4 @@
-// Copyright (c) 2019-2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2019-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#if NVML_ENABLED
 #include "dali/util/nvml.h"
+#endif
 #include "dali/pipeline/data/views.h"
 #include "dali/operators/sequence/optical_flow/optical_flow.h"
 
@@ -61,7 +63,7 @@ is upsampled *without* scaling the vector quantities.
 .. note::
   Currently, only a 1, 2 and 4 are supported for Ampere and 4 for Turing.
 )code", 4, false)
-                .DeprecateArgInFavorOf("output_format", detail::kOutputGridArgName)
+                .DeprecateArgInFavorOf("output_format", detail::kOutputGridArgName, "1.11")
                 .AddOptionalArg(detail::kEnableTemporalHintsArgName,
                                 R"code(Enables or disables temporal hints for sequences that are
 longer than two images.
@@ -91,7 +93,10 @@ come from an external source. When this option is enabled, the operator requires
                 .AddOptionalArg(detail::kImageTypeArgName,
                                 R"code(Input color space (RGB, BGR or GRAY).)code", DALI_RGB,
                                 false)
-                .AllowSequences();
+                .AllowSequences()
+                .OutputDType(0, DALI_FLOAT)
+                .OutputNDim(0, 4)
+                .OutputLayout(0, "FHWC");
 
 
 DALI_REGISTER_OPERATOR(OpticalFlow, OpticalFlow<GPUBackend>, GPU);

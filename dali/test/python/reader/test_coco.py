@@ -1,4 +1,4 @@
-# Copyright (c) 2020-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2020-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,7 +19,7 @@ import tempfile
 import json
 from nvidia.dali import Pipeline, pipeline_def
 
-from nose_utils import raises
+from nose_utils import assert_raises, raises
 from nose2.tools import params
 from test_utils import compare_pipelines, get_dali_extra_path
 
@@ -123,10 +123,76 @@ def test_operator_coco_reader_label_remap(avoid_remap):
         out = pipeline.run()
         for s in range(batch_size):
             print(out[0].at(s), out[1].at(s))
-            assert ids_map[int(out[0].at(s))] == int(
-                out[1].at(s)
-            ), f"{i}, {ids_map[int(out[0].at(s))]} vs {out[1].at(s)}"
+            assert ids_map[int(out[0].at(s).item())] == int(
+                out[1].at(s).item()
+            ), f"{i}, {ids_map[int(out[0].at(s).item())]} vs {out[1].at(s).item()}"
             i = i + 1
+
+
+@pipeline_def(batch_size=1, num_threads=1, device_id=None)
+def coco_invalid_annotations_pipe(annotations_file, file_root):
+    inputs, boxes, labels = fn.readers.coco(
+        file_root=file_root,
+        annotations_file=annotations_file,
+    )
+    return inputs, boxes, labels
+
+
+@params([], [1, 2, 3], [1, 2, 3, 4, 5])
+def test_operator_coco_reader_rejects_invalid_bbox_size(bbox):
+    annotations = {
+        "images": [
+            {
+                "id": 1,
+                "width": 640,
+                "height": 480,
+                "file_name": "car-race-438467_1280.jpg",
+            }
+        ],
+        "categories": [{"id": 1}],
+        "annotations": [
+            {
+                "id": 1,
+                "image_id": 1,
+                "category_id": 1,
+                "bbox": bbox,
+                "iscrowd": 0,
+            }
+        ],
+    }
+
+    with tempfile.TemporaryDirectory() as annotations_dir:
+        annotations_file = os.path.join(annotations_dir, "instances.json")
+        with open(annotations_file, "w") as f:
+            json.dump(annotations, f)
+
+        pipe = coco_invalid_annotations_pipe(annotations_file, file_root)
+        assert_raises(
+            ValueError,
+            pipe.run,
+            glob="*Invalid COCO annotation: `bbox` must contain exactly 4 values*",
+        )
+
+
+@params((None, "null"), (123, "number"), (True, "boolean"), ({}, "object"), ([], "array"))
+def test_operator_coco_reader_rejects_non_string_filename(filename, filename_type):
+    annotations = {
+        "images": [{"id": 1, "width": 640, "height": 480, "file_name": filename}],
+        "categories": [],
+        "annotations": [],
+    }
+
+    with tempfile.TemporaryDirectory() as annotations_dir:
+        annotations_file = os.path.join(annotations_dir, "instances.json")
+        with open(annotations_file, "w") as f:
+            json.dump(annotations, f)
+
+        pipe = coco_invalid_annotations_pipe(annotations_file, annotations_dir)
+        assert_raises(
+            ValueError,
+            pipe.run,
+            glob=f"*Invalid COCO annotation: `file_name` must be a string, got {filename_type}*",
+        )
 
 
 def test_operator_coco_reader_same_images():
@@ -270,7 +336,7 @@ def test_coco_include_crowd(include_iscrowd):
     all_iscrowd = []
     for _ in range(number_of_samples):
         boxes, image_ids = pipe.run()
-        image_ids = int(image_ids.as_array())
+        image_ids = int(image_ids.as_array().item())
         boxes = boxes.as_array()[0]
         anno = anno_mapping[image_ids]
         idx = 0
@@ -315,7 +381,7 @@ def test_coco_empty_annotations_pix():
 
     for _ in range(number_of_samples):
         mask, image_ids = pipe.run()
-        image_ids = int(image_ids.as_array())
+        image_ids = int(image_ids.as_array().item())
         max_mask = np.max(np.array(mask.as_tensor()))
         assert (max_mask != 0 and image_ids in anno_mapping and anno_mapping[image_ids]) or (
             max_mask == 0 and not (image_ids in anno_mapping and anno_mapping[image_ids])
@@ -354,7 +420,7 @@ def test_coco_empty_annotations_poly():
 
     for _ in range(number_of_samples):
         poly, vert, image_ids = pipe.run()
-        image_ids = int(image_ids.as_array())
+        image_ids = int(image_ids.as_array().item())
         poly = np.array(poly.as_tensor()).size
         vert = np.array(vert.as_tensor()).size
         assert (poly != 0 and image_ids in anno_mapping and anno_mapping[image_ids]) or (

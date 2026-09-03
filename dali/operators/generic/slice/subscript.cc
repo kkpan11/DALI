@@ -1,4 +1,4 @@
-// Copyright (c) 2021-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2021-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -26,7 +26,7 @@ namespace dali {
     .AddOptionalArg<int>("step_" #idx, "Range step", nullptr, true)
 
 
-DALI_SCHEMA(TensorSubscript)
+DALI_SCHEMA(_TensorSubscript)
     .MakeDocHidden()
     .DocStr(R"(Applies NumPy-like indexing to a batch of tensors.)")
     .NumInput(1)
@@ -64,7 +64,32 @@ DALI_SCHEMA(TensorSubscript)
     .INDEX_ARGS(28)
     .INDEX_ARGS(29)
     .INDEX_ARGS(30)
-    .INDEX_ARGS(31);
+    .INDEX_ARGS(31)
+    .OutputNDim(0, [](const OpSpec &spec)->std::optional<int> {
+      auto &input_desc = spec.InputDesc(0);
+      if (!input_desc.ndim.has_value())
+        return std::nullopt;
+      int ndim = *input_desc.ndim;
+      for (int i = 0; i < kMaxSubscripts; i++) {
+        if (spec.ArgumentDefined(make_string("at_", i)))
+          ndim--;
+      }
+      if (ndim < 0)
+        return std::nullopt;
+      return ndim;
+    })
+    .OutputLayout(0, [](const OpSpec &spec)->std::optional<TensorLayout> {
+      auto &desc = spec.InputDesc(0);
+      if (!desc.layout)
+        return std::nullopt;
+      if (desc.layout->empty())
+        return "";
+      TensorLayout out_layout;
+      for (int i = 0; i < desc.layout->ndim(); i++)
+        if (!spec.ArgumentDefined(make_string("at_", i)))
+          out_layout += desc.layout.value()[i];
+      return out_layout;
+    });
 
 template <>
 template <int ndim, int element_size>
@@ -94,9 +119,9 @@ void TensorSubscript<CPUBackend>::RunTyped(Workspace &ws) {
   tp.RunAll();
 }
 
-DALI_REGISTER_OPERATOR(TensorSubscript, TensorSubscript<CPUBackend>, CPU);
+DALI_REGISTER_OPERATOR(_TensorSubscript, TensorSubscript<CPUBackend>, CPU);
 
-DALI_SCHEMA(SubscriptDimCheck)
+DALI_SCHEMA(_SubscriptDimCheck)
     .MakeDocHidden()
     .DocStr(R"(Checks that the input has at least `num_subscripts` dimensions.
 
@@ -132,7 +157,7 @@ struct SubscriptDimCheck : public StatelessOperator<Backend> {
   int num_subscripts_ = 0;
 };
 
-DALI_REGISTER_OPERATOR(SubscriptDimCheck, SubscriptDimCheck<CPUBackend>, CPU);
-DALI_REGISTER_OPERATOR(SubscriptDimCheck, SubscriptDimCheck<GPUBackend>, GPU);
+DALI_REGISTER_OPERATOR(_SubscriptDimCheck, SubscriptDimCheck<CPUBackend>, CPU);
+DALI_REGISTER_OPERATOR(_SubscriptDimCheck, SubscriptDimCheck<GPUBackend>, GPU);
 
 }  // namespace dali

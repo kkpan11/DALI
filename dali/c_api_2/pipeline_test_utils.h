@@ -1,4 +1,4 @@
-// Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -38,13 +38,13 @@ inline TensorListHandle GetOutput(daliPipelineOutputs_h h, int idx) {
 }
 
 inline PipelineOutputsHandle PopOutputs(daliPipeline_h h) {
-  daliPipelineOutputs_h raw_out_h;
+  daliPipelineOutputs_h raw_out_h = nullptr;
   CHECK_DALI(daliPipelinePopOutputs(h, &raw_out_h));
   return PipelineOutputsHandle(raw_out_h);
 }
 
 inline PipelineOutputsHandle PopOutputsAsync(daliPipeline_h h, cudaStream_t stream) {
-  daliPipelineOutputs_h raw_out_h;
+  daliPipelineOutputs_h raw_out_h = nullptr;
   CHECK_DALI(daliPipelinePopOutputsAsync(h, &raw_out_h, stream));
   return PipelineOutputsHandle(raw_out_h);
 }
@@ -54,7 +54,7 @@ auto &Unwrap(daliTensorList_h h) {
   return static_cast<ITensorList *>(h)->Unwrap<Backend>();
 }
 
-void CompareTensorLists(const TensorList<CPUBackend> &a, const TensorList<CPUBackend> &b) {
+inline void CompareTensorLists(const TensorList<CPUBackend> &a, const TensorList<CPUBackend> &b) {
   ASSERT_EQ(a.type(), b.type());
   ASSERT_EQ(a.sample_dim(), b.sample_dim());
   ASSERT_EQ(a.num_samples(), b.num_samples());
@@ -65,7 +65,7 @@ void CompareTensorLists(const TensorList<CPUBackend> &a, const TensorList<CPUBac
     ), (GTEST_FAIL() << "Unsupported type " << a.type();));  // NOLINT
 }
 
-void CompareTensorLists(const TensorList<GPUBackend> &a, const TensorList<GPUBackend> &b) {
+inline void CompareTensorLists(const TensorList<GPUBackend> &a, const TensorList<GPUBackend> &b) {
   TensorList<CPUBackend> a_cpu, b_cpu;
   a_cpu.set_order(AccessOrder::host());
   b_cpu.set_order(AccessOrder::host());
@@ -74,7 +74,7 @@ void CompareTensorLists(const TensorList<GPUBackend> &a, const TensorList<GPUBac
   CompareTensorLists(a_cpu, b_cpu);
 }
 
-void ComparePipelineOutput(Pipeline &ref, daliPipeline_h test) {
+inline void ComparePipelineOutput(Pipeline &ref, daliPipeline_h test) {
   Workspace ws;
   ws.set_output_order(AccessOrder::host());
   ref.Outputs(&ws);
@@ -97,7 +97,7 @@ void ComparePipelineOutput(Pipeline &ref, daliPipeline_h test) {
   ref.ReleaseOutputs();
 }
 
-void ComparePipelineOutputs(
+inline void ComparePipelineOutputs(
       Pipeline &ref,
       daliPipeline_h test,
       int iters = 5,

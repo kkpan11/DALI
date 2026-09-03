@@ -16,7 +16,6 @@
 #include <algorithm>
 #include <map>
 #include "dali/core/common.h"
-#include "dali/operators/decoder/image/image.h"
 #include "dali/operators/reader/loader/sequence_loader.h"
 #include "dali/operators/reader/loader/utils.h"
 #include "dali/util/uri.h"
@@ -86,7 +85,7 @@ std::vector<std::vector<std::string>> GenerateSequences(
       for (size_t seq_elem = 0; seq_elem < sequence_length; seq_elem++) {
         sequence.push_back(s.second[i + seq_elem * stride]);
       }
-      sequences.push_back((sequence));
+      sequences.push_back(std::move(sequence));
     }
   }
   return sequences;

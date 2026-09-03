@@ -20,7 +20,6 @@ from nvidia.dali.data_node import DataNode as _DataNode
 from nvidia.dali.pipeline import Pipeline as _Pipeline
 from nvidia.dali.types import CUDAStream as _CUDAStream
 
-
 cupy = None
 
 
@@ -187,8 +186,8 @@ class PythonFunction(_get_base_impl("PythonFunction", "DLTensorPythonFunctionImp
                 self.pipeline,
                 wrapped_func,
                 num_outputs,
-                cupy.fromDlpack,
-                lambda t: t.toDlpack(),
+                cupy.from_dlpack,
+                lambda t: t.__dlpack__(),
                 *dlpack_inputs,
             )
         else:
@@ -196,8 +195,8 @@ class PythonFunction(_get_base_impl("PythonFunction", "DLTensorPythonFunctionImp
                 self.pipeline,
                 wrapped_func,
                 num_outputs,
-                cupy.fromDlpack,
-                lambda t: t.toDlpack(),
+                cupy.from_dlpack,
+                lambda t: t.__dlpack__(),
                 *dlpack_inputs,
             )
 

@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "dali/core/cuda_shared_event.h"
+#include "dali/pipeline/executor/executor.h"
 #include "dali/pipeline/operator/operator.h"
 #include "dali/pipeline/workspace/workspace.h"
 
@@ -335,14 +336,10 @@ class DLL_PUBLIC ExecGraph {
 
   ExecNode *AddOutputNode() {
     Invalidate();
+    if (!nodes_.empty() && nodes_.back().is_pipeline_output)
+      throw std::logic_error("The graph already has an output node.");
     ExecNode *node = &nodes_.emplace_back(PipelineOutputTag());
-    if (!node->instance_name.empty()) {
-      if (!name2node_.emplace(node->instance_name, node).second) {
-        nodes_.pop_back();
-        throw std::invalid_argument(
-            make_string("Duplicate node name: \"", node->instance_name, "\""));
-      }
-    }
+
     return node;
   }
 
@@ -379,7 +376,7 @@ class DLL_PUBLIC ExecGraph {
   tasking::TaskFuture Launch(tasking::Scheduler &sched);
 
   /** Populates the graph based on a pipeline definiton graph. */
-  void Lower(const graph::OpGraph &def);
+  void Lower(const graph::OpGraph &def, OperatorMap &&transferred_ops = {});
 
  private:
   /** Sorts the graph topologically. */
@@ -412,4 +409,3 @@ class DLL_PUBLIC ExecGraph {
 }  // namespace dali
 
 #endif  // DALI_PIPELINE_EXECUTOR_EXECUTOR2_EXEC_GRAPH_H_
-

@@ -1,4 +1,4 @@
-# Copyright (c) 2023-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2023-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,12 +14,14 @@
 
 import os
 import glob
-import numpy as np
+import io
 import itertools
+
+import numpy as np
 from nvidia.dali import fn, pipeline_def, types
 from test_utils import (
     compare_pipelines,
-    create_sign_off_decorator,
+    create_sign_off_registry,
     get_dali_extra_path,
     check_numba_compatibility_cpu,
     has_operator,
@@ -37,7 +39,7 @@ test_data_frames = 24
 test_sequence_shape = [test_data_frames, 426, 240, 3]  # 240p video
 
 
-stateless_signed_off = create_sign_off_decorator()
+stateless_signed_off = create_sign_off_registry()
 
 
 def tensor_list_to_array(tensor_list):
@@ -45,7 +47,7 @@ def tensor_list_to_array(tensor_list):
 
 
 # Check whether a given pipeline is stateless
-def check_is_pipeline_stateless(pipeline_factory, iterations=10):
+def check_is_pipeline_stateless(pipeline_factory, iterations=10, dump_artifacts=True):
     args = {
         "batch_size": batch_size,
         "num_threads": 4,
@@ -59,7 +61,9 @@ def check_is_pipeline_stateless(pipeline_factory, iterations=10):
         pipe.run()
 
     # Compare a pipeline that was already used with a fresh one
-    compare_pipelines(pipe, pipeline_factory(**args), batch_size, iterations)
+    compare_pipelines(
+        pipe, pipeline_factory(**args), batch_size, iterations, dump_artifacts=dump_artifacts
+    )
 
 
 # Provides the same random batch each time
@@ -97,13 +101,13 @@ def move_to(tensor, device):
     return tensor.gpu() if device == "gpu" else tensor
 
 
-def check_single_input(op, device, **kwargs):
+def check_single_input(op, device, dump_artifacts=True, **kwargs):
     @pipeline_def(enable_checkpointing=True)
     def pipeline_factory():
         data = fn.external_source(source=RandomBatch(), layout=test_data_layout, batch=True)
         return op(move_to(data, device), device=device, **kwargs)
 
-    check_is_pipeline_stateless(pipeline_factory)
+    check_is_pipeline_stateless(pipeline_factory, dump_artifacts=dump_artifacts)
 
 
 def check_single_sequence_input(op, device, **kwargs):
@@ -193,6 +197,7 @@ def test_stateful(device):
         check_single_input,
         fn.random.coin_flip,
         device,
+        dump_artifacts=False,
         glob="Mean error: *, Min error: *, Max error: *"
         "Total error count: *, Tensor size: *"
         "Index in batch: 0",
@@ -212,9 +217,9 @@ def test_resize_stateless(device):
 
 
 @params("cpu", "gpu")
-@stateless_signed_off("experimental.tensor_resize")
+@stateless_signed_off("experimental.tensor_resize", "tensor_resize")
 def test_tensor_resize_stateless(device):
-    check_single_input(fn.experimental.tensor_resize, device, axes=[0, 1], sizes=[40, 40])
+    check_single_input(fn.tensor_resize, device, axes=[0, 1], sizes=[40, 40])
 
 
 @params("cpu", "gpu")
@@ -333,9 +338,9 @@ def test_reductions_variance_stateless(device):
 
 
 @params("cpu", "gpu")
-@stateless_signed_off("experimental.equalize")
+@stateless_signed_off("experimental.equalize", "equalize")
 def test_equalize_stateless(device):
-    check_single_input(fn.experimental.equalize, device)
+    check_single_input(fn.equalize, device)
 
 
 @stateless_signed_off("transforms.crop")
@@ -436,9 +441,10 @@ def test_transpose_stateless(device):
     check_single_input(fn.transpose, device, perm=[2, 0, 1])
 
 
+@params("cpu", "gpu")
 @stateless_signed_off("paste")
-def test_paste_stateless():
-    check_single_input(fn.paste, "gpu", fill_value=0, ratio=2)
+def test_paste_stateless(device):
+    check_single_input(fn.paste, device, fill_value=0, ratio=2.0)
 
 
 @params("cpu", "gpu")
@@ -466,10 +472,10 @@ def test_sphere_stateless(device):
 
 
 @params("cpu", "gpu")
-@stateless_signed_off("experimental.filter")
+@stateless_signed_off("experimental.filter", "filter")
 def test_filter_stateless(device):
     check_single_input(
-        lambda x, **kwargs: fn.experimental.filter(x, np.full((3, 3), 1 / 9), **kwargs),
+        lambda x, **kwargs: fn.filter(x, np.full((3, 3), 1 / 9), **kwargs),
         device,
     )
 
@@ -492,14 +498,14 @@ def test_remap_stateless():
 
 
 @params("cpu", "gpu")
-@stateless_signed_off("experimental.debayer")
+@stateless_signed_off("experimental.debayer", "debayer")
 def test_debayer_stateless(device):
     @pipeline_def(enable_checkpointing=True)
     def pipeline_factory():
         data = fn.external_source(source=RandomBatch((40, 40)), layout="HW", batch=True)
         if device == "gpu":
             data = data.gpu()
-        return fn.experimental.debayer(data, blue_position=[0, 0])
+        return fn.debayer(data, blue_position=[0, 0])
 
     check_is_pipeline_stateless(pipeline_factory)
 
@@ -659,6 +665,13 @@ def test_bb_flip_stateless(device):
     check_single_bbox_input(fn.bb_flip, device, ltrb=True)
 
 
+@stateless_signed_off("bbox_rotate")
+def test_bbox_rotate_stateless():
+    check_single_bbox_input(
+        fn.bbox_rotate, "cpu", angle=45.0, input_shape=[255, 255], bbox_normalized=True
+    )
+
+
 @params("cpu", "gpu")
 @stateless_signed_off("to_decibels")
 def test_to_decibels_stateless(device):
@@ -675,13 +688,13 @@ def test_tensor_join_stateless(device, join):
 
 
 @params("cpu", "gpu")
-@stateless_signed_off("tensor_subscript", "hidden.tensor_subscript")
+@stateless_signed_off("_tensor_subscript", "hidden._tensor_subscript")
 def test_tensor_subscript_stateless(device):
     check_single_input(lambda x, **kwargs: x[0, :, 2:4:-1], device)
 
 
 @params("cpu", "gpu")
-@stateless_signed_off("subscript_dim_check", "hidden.subscript_dim_check")
+@stateless_signed_off("_subscript_dim_check", "hidden._subscript_dim_check")
 def test_subscript_dim_check(device):
     check_single_input(lambda x, **kwargs: x[:], device)
 
@@ -762,7 +775,7 @@ def test_dl_tensor_python_function_stateless(device):
 
 
 @attr("numba")
-@stateless_signed_off("experimental.numba_function")
+@stateless_signed_off("experimental.numba_function", "numba_function")
 def test_numba_function_stateless():
     import nvidia.dali.plugin.numba as dali_numba
 
@@ -776,7 +789,7 @@ def test_numba_function_stateless():
         forty_two = fn.external_source(
             source=lambda x: np.full((2,), 42, dtype=np.uint8), batch=False
         )
-        out = dali_numba.fn.experimental.numba_function(
+        out = dali_numba.fn.numba_function(
             forty_two,
             run_fn=double_sample,
             out_types=[types.DALIDataType.UINT8],
@@ -790,9 +803,9 @@ def test_numba_function_stateless():
     check_is_pipeline_stateless(numba_pipe)
 
 
-@has_operator("experimental.inflate")
+@has_operator("decoders.inflate")
 @restrict_platform(min_compute_cap=6.0)
-@stateless_signed_off("experimental.inflate")
+@stateless_signed_off("decoders.inflate", "experimental.inflate")
 def test_inflate_stateless():
     import lz4.block
 
@@ -810,7 +823,7 @@ def test_inflate_stateless():
     def pipeline():
         deflated = fn.external_source(source=itertools.repeat(input_data))
         shape = fn.external_source(source=itertools.repeat(input_shape))
-        return fn.experimental.inflate(deflated.gpu(), shape=shape)
+        return fn.decoders.inflate(deflated.gpu(), shape=shape)
 
     check_is_pipeline_stateless(pipeline)
 
@@ -837,6 +850,29 @@ def test_audio_decoder_stateless():
 @stateless_signed_off("decoders.image", "image_decoder")
 def test_image_decoder_stateless(device):
     check_single_encoded_jpeg_input(fn.decoders.image, device)
+
+
+@stateless_signed_off("decoders.numpy")
+def test_numpy_decoder_stateless():
+
+    class RandomEncode(RandomBatch):
+        def encode_sample(self, data):
+            buff = io.BytesIO()
+            np.save(buff, data)
+            buff.seek(0)
+            return np.frombuffer(buff.read(), dtype=np.uint8)
+
+        def __call__(self):
+            data = super().__call__()
+            return [self.encode_sample(sample) for sample in data]
+
+    @pipeline_def(enable_checkpointing=True)
+    def pipeline_factory():
+        enc_data = fn.external_source(source=RandomEncode())
+        dec_data = fn.decoders.numpy(enc_data)
+        return dec_data
+
+    check_is_pipeline_stateless(pipeline_factory)
 
 
 @params("cpu", "mixed")

@@ -1,4 +1,4 @@
-# Copyright (c) 2017-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2017-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-cmake_minimum_required(VERSION 3.18)
+cmake_minimum_required(VERSION 3.25.2)
 
 # allow usage of check_symbol_exists() macro
 include(CheckCXXSymbolExists)
@@ -20,18 +20,33 @@ include(CheckCXXCompilerFlag)
 include(CMakeDependentOption)
 
 include(cmake/Utils.cmake)
-include(cmake/CUDA_utils.cmake)
 
 if (POLICY CMP0075)
   cmake_policy(SET CMP0075 NEW)
 endif()
+if (POLICY CMP0175)
+  cmake_policy(SET CMP0175 NEW)
+endif()
 
 project(DALI CUDA CXX C)
+
+find_package(CUDAToolkit REQUIRED)
+
+option(BUILD_FOR_CONDA "Enable build adjustments used by conda-forge packaging" OFF)
 
 set(DALI_ROOT ${PROJECT_SOURCE_DIR})
 set(CUDA_VERSION "${CMAKE_CUDA_COMPILER_VERSION}")
 
+if(BUILD_FOR_CONDA AND DEFINED CUDAToolkit_TARGET_DIR AND
+   NOT "${CUDAToolkit_TARGET_DIR}" STREQUAL "")
+  set(CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES "${CUDAToolkit_TARGET_DIR}/include")
+  message(STATUS "BUILD_FOR_CONDA -- using CUDA target include directory: "
+                 "${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}")
+endif()
+
 parse_cuda_version(${CUDA_VERSION} CUDA_VERSION_MAJOR CUDA_VERSION_MINOR CUDA_VERSION_PATCH CUDA_VERSION_SHORT CUDA_VERSION_SHORT_DIGIT_ONLY)
+# CUDA_utils.cmake uses CUDA_VERSION_MAJOR value to determine the content of CUDA_known_archs and CUDA_TARGET_ARCHS
+include(cmake/CUDA_utils.cmake)
 
 check_cxx_compiler_flag(-fopenmp      CXX_HAVE_OMP)
 check_cxx_compiler_flag(-fopenmp-simd CXX_HAVE_OMP_SIMD)
@@ -46,7 +61,7 @@ option(WITH_DYNAMIC_NVIMGCODEC "Links nvimgcodec library dynamically during runt
 option(BUILD_WITH_ASAN "Build with ASAN" OFF)
 option(BUILD_WITH_LSAN "Build with LSAN" OFF)
 option(BUILD_WITH_UBSAN "Build with UBSAN" OFF)
-
+option(BUILD_STD_SEMAPHORE "Whether to use std::counting_semaphore instead of POSIX one." OFF)
 
 # Tests use OpenCV...
 cmake_dependent_option(BUILD_TEST "Build googletest test suite" ON
@@ -71,11 +86,9 @@ cmake_dependent_option(BUILD_PYTHON "Build Python bindings" ON
                        "NOT BUILD_DALI_NODEPS" OFF)
 cmake_dependent_option(BUILD_SHM_WRAPPER "Build shared memory bindings, needs BUILD_PYTHON=ON" ON
                       "NOT BUILD_DALI_NODEPS" OFF)
+cmake_dependent_option(USE_PREBUILD_PYBIND11 "Use prebuilt pybind11 from the system instead of the submodule" OFF
+                       "BUILD_PYTHON" OFF)
 cmake_dependent_option(BUILD_LMDB "Build LMDB readers" ON
-                       "NOT BUILD_DALI_NODEPS" OFF)
-cmake_dependent_option(BUILD_JPEG_TURBO "Build with libjpeg-turbo support" ON
-                       "NOT BUILD_DALI_NODEPS" OFF)
-cmake_dependent_option(BUILD_LIBTIFF "Build with libtiff support" ON
                        "NOT BUILD_DALI_NODEPS" OFF)
 cmake_dependent_option(BUILD_LIBSND "Build with support for libsnd library" ON
                        "NOT BUILD_DALI_NODEPS" OFF)
@@ -117,21 +130,13 @@ cmake_dependent_option(BUILD_NVDEC "Build with NVIDIA NVDEC support" ON
                        "NOT BUILD_DALI_NODEPS" OFF)  # Video support requires ffmpeg as well
 set(BUILD_FFMPEG ${BUILD_NVDEC})
 
-cmake_dependent_option(BUILD_NVJPEG "Build with nvJPEG support" ON
-                       "NOT BUILD_DALI_NODEPS" OFF)
-
-cmake_dependent_option(BUILD_NVJPEG2K "Build with nvJPEG2K support" ON
-                        "NOT BUILD_DALI_NODEPS" OFF)
-
 cmake_dependent_option(BUILD_NVOF "Build with NVIDIA OPTICAL FLOW SDK support" ON
                        "NOT BUILD_DALI_NODEPS" OFF)
 cmake_dependent_option(BUILD_NVML "Build with NVIDIA Management Library (NVML) support" ON
                        "NOT BUILD_DALI_NODEPS" OFF)
 
-cmake_dependent_option(WITH_DYNAMIC_NVJPEG "Dynamicly load nvJPEG" ON
-                      "WITH_DYNAMIC_CUDA_TOOLKIT;BUILD_NVJPEG" OFF)
 cmake_dependent_option(WITH_DYNAMIC_CUFFT "Dynamicly load cuFFT" ON
-                      "WITH_DYNAMIC_CUDA_TOOLKIT" OFF)
+                      "WITH_DYNAMIC_CUDA_TOOLKIT;BUILD_FFTS" OFF)
 cmake_dependent_option(WITH_DYNAMIC_NPP "Dynamicly load npp" ON
                       "WITH_DYNAMIC_CUDA_TOOLKIT" OFF)
 
@@ -199,7 +204,7 @@ if (NOT BUILD_PYTHON AND PYTHON_VERSIONS)
   message(WARNING "The BUILD_PYTHON option is set to off and the PYTHON_VERSIONS variable is
           provided. The latter will be ignored.")
 elseif (BUILD_PYTHON AND "${PYTHON_VERSIONS}" STREQUAL "")
-  set(PYTHON_VERSIONS "3.9;3.10;3.11;3.12;3.13")
+  set(PYTHON_VERSIONS "3.10;3.11;3.12;3.13;3.13t;3.14;3.14t;3.15;3.15t")
 endif ()
 
 if (BUILD_PYTHON)
@@ -207,6 +212,7 @@ if (BUILD_PYTHON)
   # Python binary can be used directly, otherwise we just run the python_stub_generator.py
   # and python3 is selected via shebang
   message(STATUS "Generating python stubs using interpreter: ${PYTHON_STUBGEN_INTERPRETER}")
+  set(PYBIND11_FINDPYTHON OFF)
 endif ()
 
 cmake_dependent_option(PREBUILD_DALI_LIBS "Use prebuilt DALI libs to compile python bindings" OFF
@@ -226,12 +232,22 @@ foreach(rpath IN ITEMS
   "$ORIGIN/../cufft/lib"
   "$ORIGIN/../npp/lib"
   "$ORIGIN/../nvjpeg/lib"
-  "$ORIGIN/../nvimgcodec"
-  "${NVIMGCODEC_DEFAULT_INSTALL_PATH}/lib64")
+  "$ORIGIN/../nvimgcodec")
   message(STATUS "Add to rpath: ${rpath}")
   list(APPEND CMAKE_BUILD_RPATH ${rpath})
   list(APPEND CMAKE_INSTALL_RPATH ${rpath})
 endforeach()
+
+if (BUILD_FOR_CONDA)
+  set(NVIMGCODEC_DEFAULT_LIBRARY_DIR "lib")
+else()
+  set(NVIMGCODEC_DEFAULT_LIBRARY_DIR "lib64")
+endif()
+set(nvimgcodec_default_rpath
+    "${NVIMGCODEC_DEFAULT_INSTALL_PATH}/${NVIMGCODEC_DEFAULT_LIBRARY_DIR}")
+message(STATUS "Add to rpath: ${nvimgcodec_default_rpath}")
+list(APPEND CMAKE_BUILD_RPATH ${nvimgcodec_default_rpath})
+list(APPEND CMAKE_INSTALL_RPATH ${nvimgcodec_default_rpath})
 
 get_dali_version(${PROJECT_SOURCE_DIR}/VERSION DALI_VERSION)
 
@@ -264,7 +280,7 @@ CUDA_find_supported_arch_values(CUDA_supported_archs ${USED_CUDA_COMPILER} ${CUD
 message(STATUS "CUDA supported archs: ${CUDA_supported_archs}")
 
 set(CUDA_TARGET_ARCHS_SORTED ${CUDA_TARGET_ARCHS})
-list(SORT CUDA_TARGET_ARCHS_SORTED)
+list(SORT CUDA_TARGET_ARCHS_SORTED COMPARE NATURAL)
 CUDA_find_supported_arch_values(CUDA_targeted_archs ${USED_CUDA_COMPILER} ${CUDA_TARGET_ARCHS_SORTED})
 message(STATUS "CUDA targeted archs: ${CUDA_targeted_archs}")
 if (NOT CUDA_targeted_archs)
@@ -280,12 +296,18 @@ if (DALI_CLANG_ONLY)
   CUDA_get_toolkit_from_compiler(CUDA_TOOLKIT_PATH_VAR)
   message(STATUS "Used CUDA toolkit: ${CUDA_TOOLKIT_PATH_VAR}")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unknown-cuda-version --cuda-path=${CUDA_TOOLKIT_PATH_VAR} ${CUDA_gencode_flags_clang}")
+  # in CTK 13 cuda/std/utility has been moved to cccl/cuda/std/utility and clang doesn't know about this (nor CUTLASS yet)
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -I${CUDA_TOOLKIT_PATH_VAR}/include/cccl")
 endif()
 
 CUDA_get_cmake_cuda_archs(CMAKE_CUDA_ARCHITECTURES ${CUDA_targeted_archs})
 message(STATUS "Generated CMAKE_CUDA_ARCHITECTURES: ${CMAKE_CUDA_ARCHITECTURES}")
 
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --compiler-options \"-fvisibility=hidden -Wno-free-nonheap-object\" --Wno-deprecated-gpu-targets -Xfatbin -compress-all")
+
+if ("${CUDA_VERSION_MAJOR}" GREATER_EQUAL "13")
+  set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --compress-mode=size")
+endif()
 
 # Suppress a few warnings from nvcc:
 # calling a __host__ function(...) from a __host__ __device__ function(...) is not allowed
@@ -309,15 +331,11 @@ propagate_option(BUILD_NVTX)
 propagate_option(BUILD_PYTHON)
 propagate_option(BUILD_SHM_WRAPPER)
 propagate_option(BUILD_LMDB)
-propagate_option(BUILD_JPEG_TURBO)
-propagate_option(BUILD_LIBTIFF)
 propagate_option(BUILD_LIBSND)
 propagate_option(BUILD_LIBTAR)
 propagate_option(BUILD_FFTS)
 propagate_option(BUILD_CFITSIO)
 propagate_option(BUILD_CVCUDA)
-propagate_option(BUILD_NVJPEG)
-propagate_option(BUILD_NVJPEG2K)
 propagate_option(BUILD_NVOF)
 propagate_option(BUILD_NVDEC)
 propagate_option(BUILD_FFMPEG)
@@ -326,8 +344,8 @@ propagate_option(BUILD_NVML)
 propagate_option(BUILD_CUFILE)
 propagate_option(BUILD_NVIMAGECODEC)
 propagate_option(BUILD_AWSSDK)
+propagate_option(BUILD_FOR_CONDA)
 propagate_option(LINK_DRIVER)
-propagate_option(WITH_DYNAMIC_NVJPEG)
 propagate_option(WITH_DYNAMIC_CUFFT)
 propagate_option(WITH_DYNAMIC_NPP)
 propagate_option(WITH_DYNAMIC_NVIMGCODEC)
@@ -355,15 +373,15 @@ if (RELWITHDEBINFO_CUDA_DEBUG)
   set(CMAKE_CUDA_FLAGS_RELWITHDEBINFO ${CMAKE_CUDA_FLAGS_RELWITHDEBINFO} " -lineinfo")
 endif()
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_C_STANDARD 11)
 
-set(CMAKE_CUDA_STANDARD 17)
+set(CMAKE_CUDA_STANDARD 20)
 
 # CXX flags
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wno-free-nonheap-object -Wno-unused-variable -Wno-unused-function -Wno-strict-overflow -fno-strict-aliasing -fPIC -fvisibility=hidden")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wno-free-nonheap-object -Wno-unused-variable -Wno-unused-function -Wno-strict-overflow -Wno-maybe-uninitialized -Wno-unknown-warning-option -fno-strict-aliasing -fPIC -fvisibility=hidden")
 
 if (WERROR)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Werror")
@@ -384,6 +402,12 @@ endif()
 if ("${ARCH}" STREQUAL "aarch64-linux")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=armv8-a")
 endif()
+
+if (BUILD_STD_SEMAPHORE)
+  add_definitions("-DDALI_USE_STD_SEMAPHORE")
+endif()
+
+add_definitions("-DDALI_SCHEMA_DEFAULT_METADATA_POLICY")
 
 if ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-deprecated-register -Wsign-compare -Wno-deprecated-declarations")
@@ -445,12 +469,12 @@ else()
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unknown-pragmas")
 endif()
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_C_STANDARD 11)
 
-set(CMAKE_CUDA_STANDARD 17)
+set(CMAKE_CUDA_STANDARD 20)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
 # Include directories

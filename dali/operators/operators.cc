@@ -1,4 +1,4 @@
-// Copyright (c) 2019-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2019-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,17 +13,14 @@
 // limitations under the License.
 
 #include "dali/operators.h"
+
+#include <dlfcn.h>
+#include <nvimgcodec.h>
+
 #include "dali/core/api_helper.h"
 #include "dali/core/cuda_stream_pool.h"
 #include "dali/npp/npp.h"
 #include "dali/plugin/plugin_manager.h"
-
-#if DALI_USE_NVJPEG
-#include "dali/operators/decoder/nvjpeg/nvjpeg_helper.h"
-#endif
-
-#include <dlfcn.h>
-#include <nvimgcodec.h>
 
 
 /*
@@ -44,14 +41,6 @@ DLL_PUBLIC void InitOperatorsLib() {
 
 DLL_PUBLIC int GetNppVersion() {
   return NPPGetVersion();
-}
-
-DLL_PUBLIC int GetNvjpegVersion() {
-#if DALI_USE_NVJPEG
-  return nvjpegGetVersion();
-#else
-  return -1;
-#endif
 }
 
 DLL_PUBLIC int GetNvimgcodecVersion() {
@@ -77,16 +66,22 @@ DLL_PUBLIC void EnforceMinimumNvimgcodecVersion() {
   int minor = NVIMGCODEC_MINOR_FROM_SEMVER(version);
   int patch = NVIMGCODEC_PATCH_FROM_SEMVER(version);
 
-  int cuda_version_major = CUDA_VERSION / 1000;  // 11020 -> 11, 12000 -> 12
   if (version < NVIMGCODEC_VER) {
     std::stringstream ss;
     ss << "DALI requires nvImageCodec at minimum version " << NVIMGCODEC_VER_MAJOR << "."
        << NVIMGCODEC_VER_MINOR << "." << NVIMGCODEC_VER_PATCH << ", but got " << major << "."
-       << minor << "." << patch
-       << ". Please upgrade: See https://developer.nvidia.com/nvimgcodec-downloads or simply do "
-          "`pip install nvidia-nvimgcodec-cu" + std::to_string(cuda_version_major) + "~="
+       << minor << "." << patch;
+#if FOR_CONDA_ENABLED
+    ss << ". Please upgrade: `conda install -c conda-forge 'libnvimgcodec"
+       << ">=" << NVIMGCODEC_VER_MAJOR << "." << NVIMGCODEC_VER_MINOR << "."
+       << NVIMGCODEC_VER_PATCH << ",==" << NVIMGCODEC_VER_MAJOR << "." << NVIMGCODEC_VER_MINOR
+       << ".*'`.";
+#else
+    ss << ". Please upgrade: See https://developer.nvidia.com/nvimgcodec-downloads or simply do "
+          "`pip install nvidia-nvimgcodec-cu" + std::to_string(CUDA_VERSION / 1000) + "~="
        << NVIMGCODEC_VER_MAJOR << "." << NVIMGCODEC_VER_MINOR << "." << NVIMGCODEC_VER_PATCH
        << "`.";
+#endif
     throw std::runtime_error(ss.str());
   }
 #endif

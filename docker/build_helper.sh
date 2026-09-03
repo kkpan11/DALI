@@ -32,7 +32,7 @@ export BUILD_NVTX=${BUILD_NVTX}
 export BUILD_PYTHON=${BUILD_PYTHON:-ON}
 export BUILD_LMDB=${BUILD_LMDB:-ON}
 export BUILD_NVIMAGECODEC=${BUILD_NVIMAGECODEC:-ON}
-export BUILD_JPEG_TURBO=${BUILD_JPEG_TURBO:-ON}
+export BUILD_LIBJPEG_TURBO=${BUILD_LIBJPEG_TURBO:-ON}
 export BUILD_OPENCV=${BUILD_OPENCV:-ON}
 export BUILD_PROTOBUF=${BUILD_PROTOBUF:-ON}
 export BUILD_NVJPEG=${BUILD_NVJPEG:-ON}
@@ -47,10 +47,10 @@ export BUILD_NVML=${BUILD_NVML:-ON}
 export BUILD_FFTS=${BUILD_FFTS:-ON}
 export BUILD_CFITSIO=${BUILD_CFITSIO:-ON}
 export BUILD_CVCUDA=${BUILD_CVCUDA:-ON}
-export BUILD_CUFILE=${BUILD_CUFILE:-OFF}
-export BUILD_NVCOMP=${BUILD_NVCOMP:-OFF}
+export BUILD_CUFILE=${BUILD_CUFILE:-ON}
+export BUILD_NVCOMP=${BUILD_NVCOMP:-ON}
 export LINK_LIBCUDA=${LINK_LIBCUDA:-OFF}
-export WITH_DYNAMIC_CUDA_TOOLKIT=${WITH_DYNAMIC_CUDA_TOOLKIT:-OFF}
+export WITH_DYNAMIC_CUDA_TOOLKIT=${WITH_DYNAMIC_CUDA_TOOLKIT:-ON}
 export WITH_DYNAMIC_NVJPEG=${WITH_DYNAMIC_NVJPEG:-ON}
 export WITH_DYNAMIC_CUFFT=${WITH_DYNAMIC_CUFFT:-ON}
 export WITH_DYNAMIC_NPP=${WITH_DYNAMIC_NPP:-ON}
@@ -67,7 +67,7 @@ export GIT_SHA=${GIT_SHA}
 export DALI_TIMESTAMP=${DALI_TIMESTAMP}
 export NVIDIA_DALI_BUILD_FLAVOR=${NVIDIA_DALI_BUILD_FLAVOR}
 export CUDA_TARGET_ARCHS=${CUDA_TARGET_ARCHS}
-export WHL_PLATFORM_NAME=${WHL_PLATFORM_NAME:-manylinux2014_${ARCH}}
+export WHL_PLATFORM_NAME=${WHL_PLATFORM_NAME:-manylinux_2_28_${ARCH}}
 export WHL_OUTDIR=${WHL_OUTDIR:-/wheelhouse}
 export WHL_COMPRESSION=${WHL_COMPRESSION:-YES}
 export PATH=/usr/local/cuda/bin:${PATH}
@@ -87,7 +87,7 @@ cmake ../ -DCMAKE_INSTALL_PREFIX=.                 \
       -DBUILD_PYTHON=${BUILD_PYTHON}               \
       -DBUILD_LMDB=${BUILD_LMDB}                   \
       -DBUILD_NVIMAGECODEC=${BUILD_NVIMAGECODEC}   \
-      -DBUILD_JPEG_TURBO=${BUILD_JPEG_TURBO}       \
+      -DBUILD_LIBJPEG_TURBO=${BUILD_LIBJPEG_TURBO} \
       -DBUILD_OPENCV=${BUILD_OPENCV}               \
       -DBUILD_PROTOBUF=${BUILD_PROTOBUF}           \
       -DBUILD_NVJPEG=${BUILD_NVJPEG}               \
@@ -141,13 +141,13 @@ bundle_wheel() {
 
 if [ "${BUILD_PYTHON}" = "ON" ]; then
     # use stored as a compression method to make it faster as bundle-wheel.sh need to repack anyway
-    # call setup.py to avoid slow copy to tmp dir
+    # avoid isolated venv creation and use dependencies already installed in the image
     pushd dali/python
-    python setup.py bdist_wheel \
-        --verbose \
-        --compression=stored \
-        --python-tag=py3 \
-        --plat-name=${WHL_PLATFORM_NAME}
+    python -m build --wheel --no-isolation \
+        -C--global-option=--verbose \
+        -C--build-option=--compression=stored \
+        -C--build-option=--python-tag=py3 \
+        -C--build-option="--plat-name=${WHL_PLATFORM_NAME}"
     popd
     mv dali/python/dist/*.whl ./
 

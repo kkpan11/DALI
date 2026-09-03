@@ -37,12 +37,12 @@ Building Python Wheel
 Change directory (``cd``) into ``docker`` directory and run ``./build.sh``. If needed,
 set the following environment variables:
 
-* | CUDA_VERSION - CUDA toolkit version (11.8 and 12.4 are officially supported, 11.0,
-    11.1, 11.2, 11.4, 11.5, 11.6, 11.7, 12.0, 12.1, 12.2, 12.3, 12.4, 12.5, 12.6, 12.7 and 12.8 are deprecated
+* | CUDA_VERSION - CUDA toolkit version (12.9 and 13.3 are officially supported,
+    12.0, 12.1, 12.2, 12.3, 12.4, 12.5, 12.6, 12.8, 13.0, 13.1 and 13.2 are deprecated
     and may not work).
-  | The default is ``12.9``. Thanks to CUDA extended compatibility mode, CUDA 11.1, 11.2, 11.3, 11.4
-    11.5, 11.6, 11.7 and 11.8 wheels are named as CUDA 11.0 because it can work with the CUDA 11.0 R450.x driver
-    family. Same applies to CUDA 12.x. Please update to the latest recommended driver version in that family.
+  | The default is ``13.3``. Thanks to CUDA extended compatibility mode, CUDA 12.x wheels are named as
+    CUDA 12.0 because it can work with the CUDA 12.0 R525.x driver
+    family. Same applies to CUDA 13.x. Please update to the latest recommended driver version in that family.
   | If the value of the CUDA_VERSION is prefixed with `.` then any value ``.XX.Y`` can be passed,
     the supported version check is suppressed, and the user needs to make sure that
     Dockerfile.cudaXXY.deps is present in the `docker/` directory.
@@ -90,7 +90,7 @@ set the following environment variables:
     (SBSA - Server Base System Architecture) are supported.
   | The default is ``x86_64``.
 * | WHL_PLATFORM_NAME - the name of the Python wheel platform tag.
-  | The default is ``manylinux2014_x86_64``.
+  | The default is ``manylinux_2_28_x86_64``.
 
 It is worth to mention that build.sh should accept the same set of environment variables as the project CMake.
 
@@ -104,9 +104,9 @@ For example:
 
 .. code-block:: bash
 
-  CUDA_VERSION=11.1 ./build.sh
+  CUDA_VERSION=12.1 ./build.sh
 
-Will build CUDA 11.1 based DALI for Python 3 and place relevant Python wheel inside DALI_root/wheelhouse
+Will build CUDA 12.1 based DALI for Python 3 and place relevant Python wheel inside DALI_root/wheelhouse
 The produced DALI wheel and TensorFlow Plugin are compatible with all Python versions supported by DALI.
 
 ----
@@ -180,16 +180,11 @@ have an *unofficial* option to disable them.
     --disable-doc \
     --disable-avdevice \
     --disable-swresample \
-    --disable-postproc \
     --disable-w32threads \
     --disable-os2threads \
-    --disable-dct \
     --disable-dwt \
     --disable-error-resilience \
     --disable-lsp \
-    --disable-mdct \
-    --disable-rdft \
-    --disable-fft \
     --disable-faan \
     --disable-pixelutils \
     --disable-autodetect \
@@ -209,7 +204,13 @@ have an *unofficial* option to disable them.
     --disable-filters \
     --disable-bsfs \
     --disable-decoder=ipu \
-    --enable-bsf=h264_mp4toannexb,hevc_mp4toannexb,mpeg4_unpack_bframes && \
+    --disable-decoder=hevc \
+    --disable-decoder=h264 \
+    --disable-decoder=aac \
+    --disable-decoder=aac_fixed \
+    --disable-decoder=aac_latm \
+    --enable-bsf=h264_mp4toannexb,hevc_mp4toannexb,mpeg4_unpack_bframes \
+    --disable-lzma && \
     # adds "| sed 's/\(.*{\)/DALI_\1/' |" to the version file generation command - it prepends "DALI_" to the symbol version
     sed -i 's/\$\$(M)sed '\''s\/MAJOR\/\$(lib$(NAME)_VERSION_MAJOR)\/'\'' \$\$< | \$(VERSION_SCRIPT_POSTPROCESS_CMD) > \$\$\@/\$\$(M)sed '\''s\/MAJOR\/\$(lib$(NAME)_VERSION_MAJOR)\/'\'' \$\$< | sed '\''s\/\\(\.*{\\)\/DALI_\\1\/'\'' | \$(VERSION_SCRIPT_POSTPROCESS_CMD) > \$\$\@/' ffbuild/library.mak \
     make
@@ -328,10 +329,19 @@ Optional CMake Build Parameters
 -  ``BUILD_BENCHMARK`` - include building benchmarks (default: ON)
 -  ``BUILD_LMDB`` - build with support for LMDB (default: OFF)
 -  ``BUILD_NVTX`` - build with NVTX profiling enabled (default: OFF)
--  ``BUILD_NVJPEG`` - build with ``nvJPEG`` support (default: ON)
--  ``BUILD_NVJPEG2K`` - build with ``nvJPEG2k`` support (default: ON)
--  ``BUILD_LIBTIFF`` - build with ``libtiff`` support (default: ON)
--  ``BUILD_FFTS`` - build with ``ffts`` support (default: ON)
+-  ``BUILD_NVJPEG`` - build the ``nvJPEG`` extension for ``nvImageCodec`` (default: ON, see note below)
+-  ``BUILD_NVJPEG2K`` - build the ``nvJPEG2k`` extension for ``nvImageCodec`` (default: ON, see note below)
+-  ``BUILD_LIBJPEG_TURBO`` - build the ``libjpeg-turbo`` extension for ``nvImageCodec`` (default: ON, see note below)
+-  ``BUILD_LIBTIFF`` - build the ``libtiff`` extension for ``nvImageCodec`` (default: ON, see note below)
+
+.. note::
+
+   ``BUILD_NVJPEG``, ``BUILD_NVJPEG2K``, ``BUILD_LIBJPEG_TURBO`` and ``BUILD_LIBTIFF`` only take effect
+   when ``nvImageCodec`` is statically linked (``WITH_DYNAMIC_NVIMGCODEC=OFF``); they select which
+   extensions are built into and registered with the bundled ``nvImageCodec``. With dynamic linking
+   (the default), ``nvImageCodec`` discovers and loads extensions at runtime from the installed
+   ``nvidia-nvimgcodec-cuXX`` package and these flags have no effect on the resulting DALI binary.
+-  ``BUILD_FFTS`` - build with ``ffts`` support (what includes GPU operator based on cuFFT) (default: ON)
 -  ``BUILD_CFITSIO`` - build with ``CFITSIO`` support (default: ON)
 -  ``BUILD_LIBSND`` - build with libsnd support (default: ON)
 -  ``BUILD_LIBTAR`` - build with libtar support (default: ON)
@@ -340,7 +350,7 @@ Optional CMake Build Parameters
 -  ``BUILD_NVML`` - build with ``NVIDIA Management Library`` (``NVML``) support (default: ON)
 -  ``BUILD_CUFILE`` - build with ``GPU Direct Storage`` support (default: ON)
 -  ``BUILD_NVIMAGECODEC`` - build with ``NVIDIA nvImageCodec library`` support (default: ON)
--  ``VERBOSE_LOGS`` - enables verbose loging in DALI. (default: OFF)
+-  ``VERBOSE_LOGS`` - enables verbose logging in DALI. (default: OFF)
 -  ``WERROR`` - treat all build warnings as errors (default: OFF)
 -  ``BUILD_DALI_NODEPS`` - disables support for third party libraries that are normally expected to be available in the system
 
@@ -368,8 +378,6 @@ To run with sanitizers enabled issue:
   STDC_VERSION used by the system. Usually 6.
 
 -  ``DALI_BUILD_FLAVOR`` - Allow to specify custom name suffix (i.e. 'nightly') for nvidia-dali whl package
--  *(Unofficial)* ``BUILD_JPEG_TURBO`` - build with ``libjpeg-turbo`` (default: ON)
--  *(Unofficial)* ``BUILD_LIBTIFF`` - build with ``libtiff`` (default: ON)
 
 .. note::
 
@@ -381,7 +389,6 @@ To run with sanitizers enabled issue:
 Following CMake parameters could be helpful in setting the right paths:
 
 * FFMPEG_ROOT_DIR - path to installed FFmpeg
-* NVJPEG_ROOT_DIR - where nvJPEG can be found (from CUDA 10.0 it is shipped with the CUDA toolkit so this option is not needed there)
 * libjpeg-turbo options can be obtained from `**libjpeg CMake docs page** <https://cmake.org/cmake/help/v3.11/module/FindJPEG.html>`_
 * protobuf options can be obtained from `**protobuf CMake docs page** <https://cmake.org/cmake/help/v3.11/module/FindProtobuf.html>`_
 

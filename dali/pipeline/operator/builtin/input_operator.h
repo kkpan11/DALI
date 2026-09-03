@@ -1,4 +1,4 @@
-// Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,6 +15,7 @@
 #ifndef DALI_PIPELINE_OPERATOR_BUILTIN_INPUT_OPERATOR_H_
 #define DALI_PIPELINE_OPERATOR_BUILTIN_INPUT_OPERATOR_H_
 
+#include <condition_variable>
 #include <list>
 #include <memory>
 #include <optional>
@@ -28,6 +29,7 @@
 #include "dali/pipeline/operator/builtin/caching_list.h"
 #include "dali/pipeline/operator/operator.h"
 #include "dali/pipeline/util/worker_thread.h"
+#include "dali/core/nvtx.h"
 
 namespace dali {
 
@@ -147,18 +149,18 @@ class InputOperator : public Operator<Backend>, virtual public BatchSizeProvider
           device_id_(spec.GetArgument<int>("device_id")),
           blocking_(spec.GetArgument<bool>("blocking")),
           no_copy_(spec.GetArgument<bool>("no_copy")),
-          sync_worker_(device_id_, false, "InputOperator sync_worker_") {
+          sync_worker_(CreateWorkerThread(device_id_, false, "InputOperator sync_worker_")) {
     if (std::is_same<Backend, GPUBackend>::value) {
       internal_copy_stream_ = CUDAStreamPool::instance().Get(device_id_);
       internal_copy_order_ = internal_copy_stream_;
     }
-    sync_worker_.WaitForInit();
+    sync_worker_->WaitForInit();
   }
 
 
   virtual ~InputOperator() {
-    sync_worker_.ForceStop();
-    sync_worker_.Shutdown();
+    sync_worker_->ForceStop();
+    sync_worker_->Shutdown();
   }
 
   DISABLE_COPY_MOVE_ASSIGN(InputOperator);
@@ -277,12 +279,14 @@ class InputOperator : public Operator<Backend>, virtual public BatchSizeProvider
    * @param target_data_id Where the ID of the current data shall be injected.
    *                       @see named_pointer_to_tensor_list_t.
    * @param tp TheadPool used to copy the data.
+   *
+   * @return true, if the data was copied to the target, false otherwise
    */
-  void DLL_PUBLIC
+  bool DLL_PUBLIC
   ForwardCurrentData(TensorList<CPUBackend> &target, std::optional<std::string> &target_data_id,
                      ThreadPool &tp);
 
-  void DLL_PUBLIC
+  bool DLL_PUBLIC
   ForwardCurrentData(TensorList<GPUBackend> &target, std::optional<std::string> &target_data_id,
                      cudaStream_t stream = nullptr);
   ///@}
@@ -326,10 +330,23 @@ class InputOperator : public Operator<Backend>, virtual public BatchSizeProvider
    * @param ws Current workspace.
    * @param depleted Value of the trace.
    */
-  void SetDepletedOperatorTrace(Workspace& ws, bool depleted) {
+  void SetDepletedOperatorTrace(Workspace &ws, bool depleted) {
     ws.SetOperatorTrace("depleted", depleted ? "true" : "false");
   }
 
+  void MakeOutputUnshareable(Workspace &ws, const TensorList<Backend> &out) {
+    auto &unshareable = ws.GetIterationData()->unshareable_data;
+    auto lock = unshareable.Lock();
+    if (out.IsContiguous()) {
+      unshareable.Add(out.raw_tensor(0), out.nbytes());
+    } else {
+      size_t element_size = out.type_info().size();
+      for (int i = 0; i < out.num_samples(); i++) {
+        const auto &sample = out[i];
+        unshareable.Add(sample.raw_data(), volume(sample.shape()) * element_size);
+      }
+    }
+  }
 
   int device_id_ = -1;
   bool blocking_ = true;
@@ -366,7 +383,7 @@ class InputOperator : public Operator<Backend>, virtual public BatchSizeProvider
     std::lock_guard<std::mutex> busy_lock(busy_m_);
     auto tl_elm = GetEmptyOutputBatch(std::move(data_id));
     tl_elm->copy_requested = false;
-    tl_elm->copy_performed = true;
+    tl_elm->copy_performed = false;
     // set pinned if needed
     if (batch.is_pinned() != tl_elm->data.is_pinned()) {
       tl_elm->data.Reset();
@@ -560,7 +577,7 @@ class InputOperator : public Operator<Backend>, virtual public BatchSizeProvider
    */
   bool zero_copy_noncontiguous_gpu_input_ = false;
 
-  WorkerThread sync_worker_;
+  std::unique_ptr<WorkerThread> sync_worker_;
   CUDAStreamLease internal_copy_stream_ = {};
   AccessOrder internal_copy_order_ = AccessOrder::host();
 };

@@ -1,4 +1,4 @@
-// Copyright (c) 2020-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2020-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -35,7 +35,13 @@ a single value per sample is generated.
     .AddOptionalArg<float>("probability",
       R"code(Probability of value 1.)code",
       0.5f, true)
-    .AddParent("RNGAttr");
+    .AddParent("RNGAttr")
+    .OutputDType(0, [](const OpSpec &spec) {
+      DALIDataType dtype;
+      if (spec.TryGetArgument(dtype, "dtype"))
+        return dtype;
+      return DALI_INT32;
+    });
 
 DALI_REGISTER_OPERATOR(random__CoinFlip, CoinFlip<CPUBackend>, CPU);
 
@@ -55,7 +61,8 @@ sample is generated.
     .InputDevice(0, InputDevice::Metadata)
     .NumOutput(1)
     .AddParent("random__CoinFlip")
-    .Deprecate("random__CoinFlip");  // Deprecated in 0.30
+    .MakeDocHidden()
+    .Deprecate("0.30", "random__CoinFlip");
 
 
 DALI_REGISTER_OPERATOR(CoinFlip, CoinFlip<CPUBackend>, CPU);

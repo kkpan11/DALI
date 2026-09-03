@@ -24,7 +24,7 @@ namespace {
 typedef void* NVCOMP;
 
 static const char __nvCompfileLibName[] = "libnvcomp.so";
-static const char __nvCompfileLibName1[] = "libnvcomp.so.4";
+static const char __nvCompfileLibName1[] = "libnvcomp.so.5";
 
 NVCOMP loadNvCompFileLibrary() {
   NVCOMP ret = nullptr;
@@ -35,8 +35,13 @@ NVCOMP loadNvCompFileLibrary() {
     ret = dlopen(__nvCompfileLibName, RTLD_NOW);
 
     if (!ret) {
+#if FOR_CONDA_ENABLED
+      fprintf(stderr, "dlopen libnvcomp.so failed with error %s!. Please install libnvcomp: "
+              "`conda install -c conda-forge libnvcomp`.\n", dlerror());
+#else
       fprintf(stderr, "dlopen libnvcomp.so failed with error %s!. Please install libnvcomp.\n",
               dlerror());
+#endif
     }
   }
   return ret;

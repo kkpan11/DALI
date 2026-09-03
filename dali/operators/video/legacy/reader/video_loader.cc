@@ -686,7 +686,7 @@ void VideoLoader::push_sequence_to_read(std::string filename, int frame, int cou
     int total_count = 1 + (count - 1) * stride_;
     auto req = FrameReq{std::move(filename), frame, total_count, stride_, {0, 0}};
     // give both reader thread and decoder a copy of what is coming
-    send_queue_.push(req);
+    send_queue_.push(std::move(req));
 }
 
 void VideoLoader::receive_frames(SequenceWrapper& sequence) {
@@ -728,12 +728,12 @@ void VideoLoader::ReadSample(SequenceWrapper& tensor) {
     tensor.read_sample_f = [this,
                             file_name = file_info_[seq_meta.filename_idx].filename,
                             index = seq_meta.frame_idx, count = seq_meta.length, &tensor] () {
-      thread_file_reader_.DoWork([this]() {
+      thread_file_reader_->DoWork([this]() {
         read_file();
       });
       push_sequence_to_read(file_name, index, count);
       receive_frames(tensor);
-      thread_file_reader_.WaitForWork();
+      thread_file_reader_->WaitForWork();
     };
     ++current_frame_idx_;
 

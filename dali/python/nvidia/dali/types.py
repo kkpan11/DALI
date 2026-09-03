@@ -1,4 +1,4 @@
-# Copyright (c) 2017-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2017-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -104,7 +104,7 @@ if _tfrecord_support:
     )
 
 
-def _type_name_convert_to_string(dtype, allow_tensors):
+def _type_name_convert_to_string(dtype, allow_tensors, api="fn"):
     if dtype in _known_types:
         type_name = _known_types[dtype][0]
         if dtype in _enum_types:
@@ -113,7 +113,10 @@ def _type_name_convert_to_string(dtype, allow_tensors):
         if dtype in _vector_types:
             ret += " or list of " + type_name
         if allow_tensors:
-            ret += " or TensorList of " + type_name
+            if api == "dynamic":
+                ret += " or Tensor/Batch of " + type_name
+            else:
+                ret += " or TensorList of " + type_name
         return ret
     else:
         raise RuntimeError(str(dtype) + " does not correspond to a known type.")
@@ -122,6 +125,9 @@ def _type_name_convert_to_string(dtype, allow_tensors):
 def _type_convert_value(dtype, val):
     if dtype not in _known_types:
         raise RuntimeError(str(dtype) + " does not correspond to a known type.")
+    # handle non-0 numpy 1 element tensors that cannot be direclty converted to scalars
+    if item := getattr(val, "item", None):
+        val = item()
     return _known_types[dtype][1](val)
 
 
@@ -244,11 +250,13 @@ class ScalarConstant(object):
         if value_dtype is not None:
             dali_type = to_dali_type(value.dtype)
             if dali_type in _int_types:
-                value = int(value)
+                value = int(value.item())
             elif dali_type in _float_types:
-                value = float(value)
+                value = float(value.item())
             elif dali_type in _bool_types:
-                value = bool(value)
+                value = bool(value.item())
+            else:
+                value = value.item()
             if dtype is None:
                 dtype = dali_type
 
@@ -387,12 +395,22 @@ def _is_numpy_array(value):
 def _raw_cuda_stream(stream_obj):
     if stream_obj is None:
         return None
-    elif hasattr(stream_obj, "cuda_stream"):  # torch
-        return stream_obj.cuda_stream
-    elif hasattr(stream_obj, "ptr"):  # cupy
-        return stream_obj.ptr
-    else:
+    elif isinstance(stream_obj, backend_impl.Stream):
+        return stream_obj.handle
+    elif x := getattr(stream_obj, "__cuda_stream__", None):  # __cuda_stream__ protocol
+        return x()[1]
+    elif (x := getattr(stream_obj, "cuda_stream", None)) is not None:  # torch
+        return x
+    elif isinstance(stream_obj, int):
         return stream_obj
+    elif (x := getattr(stream_obj, "ptr", None)) is not None:  # cupy
+        return stream_obj.ptr
+    elif isinstance(stream_obj, ctypes.c_void_p):
+        return stream_obj.value
+    elif (x := getattr(stream_obj, "handle", None)) is not None:
+        return x
+    else:
+        raise TypeError(f"Cannot interpret the object {stream_obj} as a CUDA stream.")
 
 
 def _get_default_stream_for_array(array):
@@ -430,7 +448,7 @@ def _get_device_id_for_array(array):
         return None
 
 
-_cupy_array_type_regex = re.compile(".*cupy.*\..*ndarray.*")  # noqa: W605
+_cupy_array_type_regex = re.compile(r".*cupy.*\..*ndarray.*")  # noqa: W605
 
 
 def _is_cupy_array(value):
@@ -440,6 +458,7 @@ def _is_cupy_array(value):
 # common type names used by numpy, torch and possibly
 _type_name_to_dali_type = {
     "bool": DALIDataType.BOOL,
+    "bool_": DALIDataType.BOOL,
     "boolean": DALIDataType.BOOL,
     "int8": DALIDataType.INT8,
     "sbyte": DALIDataType.INT8,
@@ -468,7 +487,10 @@ dali_type_converters = []
 
 
 def to_dali_type(framework_type):
-    t = str(framework_type)
+    if isinstance(framework_type, type):
+        t = framework_type.__qualname__  # handle np.int8, etc.
+    else:
+        t = str(framework_type)
     if t.startswith("torch."):
         t = t[6:]
     t = _type_name_to_dali_type.get(t)

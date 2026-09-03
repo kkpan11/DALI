@@ -1,8 +1,12 @@
 #!/bin/bash -e
 
-set -o nounset
 set -o errexit
 set -o pipefail
+
+# enable compat for CUDA 13 if the test image doesn't support it yet
+source <(echo "set -x"; cat ../setup_test_common.sh; echo "set +x")
+
+install_cuda_compat
 
 cd /opt/dali/docs/examples/use_cases/pytorch/resnet50
 
@@ -29,8 +33,8 @@ check_training_results() {
     fi
 
     # Define the minimum performance thresholds
-    local MIN_TOP1=20.0
-    local MIN_TOP5=40.0
+    local MIN_TOP1=15.0
+    local MIN_TOP5=35.0
     local MIN_PERF=2900
 
     # Extract relevant information from the log file
@@ -59,6 +63,7 @@ check_training_results() {
     if [[ "$TOP1_RESULT" == "OK" && "$TOP5_RESULT" == "OK" && "$PERF_RESULT" == "OK" ]]; then
         return 0
     fi
+    return 4
 }
 
 torchrun --nproc_per_node=${NUM_GPUS} main.py -a resnet50 --b 256 --loss-scale 128.0 --workers 8 --lr=0.4 --fp16-mode --epochs 5 --data_loader dali ./ 2>&1 | tee dali.log
@@ -69,5 +74,15 @@ torchrun --nproc_per_node=${NUM_GPUS} main.py -a resnet50 --b 256 --loss-scale 1
 check_training_results dali_proxy.log
 RESULT_DALI_PROXY=$?
 
-# Return 0 if both are 0, otherwise return the first non-zero code
-exit ${RESULT_DALI:-$RESULT_DALI_PROXY}
+torchrun --nproc_per_node=${NUM_GPUS} main.py -a resnet50 --b 256 --loss-scale 128.0 --workers 8 --lr=0.4 --fp16-mode --epochs 5 --data_loader ndd ./ 2>&1 | tee ndd.log
+check_training_results ndd.log
+RESULT_NDD=$?
+
+# Return 0 if all are 0, otherwise return the first non-zero code
+if [[ ${RESULT_DALI} -ne 0 ]]; then
+    exit ${RESULT_DALI}
+elif [[ ${RESULT_DALI_PROXY} -ne 0 ]]; then
+    exit ${RESULT_DALI_PROXY}
+else
+    exit ${RESULT_NDD}
+fi

@@ -1,4 +1,4 @@
-# Copyright (c) 2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,8 +13,11 @@
 # limitations under the License.
 
 
-from typing import Sequence
-from typing import Any, Union, TypeAlias, Protocol
+import enum
+from collections.abc import Iterable, Sequence
+from typing import Any, Protocol, TypeAlias
+
+import numpy.typing as npt
 
 
 class ArrayInterface(Protocol):
@@ -36,18 +39,42 @@ class CudaArrayInterface(Protocol):
     """
 
     @property
-    def __cuda_array_interface__(self) -> Any: ...
+    def __cuda_array_interface__(self) -> dict[str, Any]: ...
 
 
-TensorLikeIn: TypeAlias = Union[ArrayInterface, Sequence[int], Sequence[float], int, float]
+class DLPack(Protocol):
+    """
+    Protocol representing classes that are compatible with DLPack interface.
+    See: https://dmlc.github.io/dlpack/latest/python_spec.html.
+    """
+
+    def __dlpack__(
+        self,
+        *,
+        stream: int | Any | None = None,
+        max_version: tuple[int, int] | None = None,
+        dl_device: tuple[Any, int] | None = None,
+        copy: bool | None = None,
+    ) -> Any: ...  # types.PyCapsule is only available since Python 3.13
+
+    def __dlpack_device__(self) -> tuple[enum.Enum, int]: ...
+
+
+TensorLikeIn: TypeAlias = ArrayInterface | Sequence[int] | Sequence[float] | int | float
 """
 Constant input to the operator, that is expressed by a single tensor. Such input represents
 one sample that is repeated (broadcast) to form a batch.
 """
 
 
-TensorLikeArg: TypeAlias = ArrayInterface
+TensorLikeArg: TypeAlias = ArrayInterface | DLPack
 """
 Constant argument to the operator, that is expressed by a single tensor. Such input represents
 one sample that is repeated (broadcast) to form a batch.
 """
+
+TensorLike: TypeAlias = ArrayInterface | CudaArrayInterface | DLPack | npt.ArrayLike
+"""Object compatible with dynamic mode tensors"""
+
+BatchLike: TypeAlias = Iterable[TensorLike] | TensorLike
+"""Object compatible with dynamic mode batches"""

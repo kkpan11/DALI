@@ -1,4 +1,4 @@
-// Copyright (c) 2019-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2019-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,6 +13,8 @@
 // limitations under the License.
 
 #include "dali/pipeline/executor/async_separated_pipelined_executor.h"
+
+#include <algorithm>
 
 namespace dali {
 
@@ -39,14 +41,16 @@ void AsyncSeparatedPipelinedExecutor::Prefetch() {
     RunGPU();
   }
 
-  for (int i = 0; i < queue_sizes_.cpu_size; i++) {
+  int cpu_only_prefetch_count =
+      std::max(0, queue_sizes_.cpu_size - queue_sizes_.gpu_size);
+  for (int i = 0; i < cpu_only_prefetch_count; i++) {
     RunCPU();
   }
 }
 
 int AsyncSeparatedPipelinedExecutor::InputFeedCount(std::string_view op_name) {
   (void)graph_->Node(op_name);
-  return queue_sizes_.cpu_size + queue_sizes_.gpu_size;
+  return std::max(queue_sizes_.cpu_size, queue_sizes_.gpu_size);
 }
 
 }  // namespace dali

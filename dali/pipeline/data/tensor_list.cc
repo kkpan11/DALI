@@ -1,4 +1,4 @@
-// Copyright (c) 2020-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2020-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -21,53 +21,13 @@
 #include "dali/core/tensor_shape.h"
 #include "dali/pipeline/data/tensor_list.h"
 #include "dali/pipeline/data/types.h"
+#include "dali/core/cuda_stream_pool.h"
+#include "dali/pipeline/data/copy_util.h"
+#include "dali/core/mm/memory.h"
+#include "dali/core/nvtx.h"
 
 namespace dali {
 namespace copy_impl {
-
-/**
- * @defgroup copy_impl Helper code for copying batches
- * The functions used as scaffolding for the synchronization of order for source and destination
- * buffers and extract the pointers from contiguous and non-contiguous batches.
- *
- * The usage is expected to be as follows:
- * 1. SyncBefore
- * 2. Resize the destination buffer(s)
- * 3. SyncAfterResize
- * 4. Use the CopyImpl - it can copy between batch and a single contiguous allocation, assuming both
- *    batches are correctly resized already
- * 5. SyncAfter
- *
- * @{
- */
-/**
- * @brief Pick the order for Copy to be run on and synchronize
- *
- * The copy ordering can be:
- * - explict, as specified in `order`
- * - the one from `src_order`, if set
- * - the one from `dst_order`
- * @return copy_order - order on which we will do the copy
- */
-AccessOrder SyncBefore(AccessOrder dst_order, AccessOrder src_order, AccessOrder order) {
-  if (!order)
-    order = src_order ? src_order : dst_order;
-
-  // The destination buffer must be ready to be overwritten
-  order.wait(dst_order);
-  // The source buffer must be ready to cosume
-  order.wait(src_order);
-
-  return order;
-}
-
-
-/**
- * @brief Wait for the copy to finish in the order of the dst buffer.
- */
-void SyncAfter(AccessOrder dst_order, AccessOrder copy_order) {
-  dst_order.wait(copy_order);
-}
 
 /**
  * @brief Copy between two non-contiguous batches
@@ -91,8 +51,17 @@ void CopySamplewiseImpl(DstBatch<DstBackend> &dst, const SrcBatch<SrcBackend> &s
     sizes.push_back(src.shape()[i].num_elements());
   }
 
-  type_info.Copy<SrcBackend, DstBackend>(dsts.data(), srcs.data(), sizes.data(), num_samples,
-                                         order.stream(), use_copy_kernel);
+  std::optional<int> dst_dev_id, src_dev_id;
+  if (std::is_same_v<SrcBackend, GPUBackend>)
+    src_dev_id = src.device_id();
+  if (std::is_same_v<DstBackend, GPUBackend>)
+    dst_dev_id = dst.device_id();
+
+  type_info.Copy<SrcBackend, DstBackend>(
+      dsts.data(), dst_dev_id,
+      srcs.data(), src_dev_id,
+      sizes.data(), num_samples,
+      order.stream(), use_copy_kernel);
 }
 
 
@@ -101,7 +70,9 @@ void CopySamplewiseImpl(DstBatch<DstBackend> &dst, const SrcBatch<SrcBackend> &s
  * Assumes matching shapes and type.
  */
 template <typename DstBackend, typename SrcBackend, template <typename> typename DstBatch>
-void CopySamplewiseImpl(DstBatch<DstBackend> &dst, const void *src, const TypeInfo &type_info,
+void CopySamplewiseImpl(DstBatch<DstBackend> &dst,
+                        const void *src, std::optional<int> src_dev_id,
+                        const TypeInfo &type_info,
                         AccessOrder order, bool use_copy_kernel = false) {
   auto num_samples = dst.num_samples();
   BatchVector<void *> dsts;
@@ -113,8 +84,15 @@ void CopySamplewiseImpl(DstBatch<DstBackend> &dst, const void *src, const TypeIn
     sizes.push_back(dst.shape()[i].num_elements());
   }
 
-  type_info.Copy<DstBackend, SrcBackend>(dsts.data(), src, sizes.data(), num_samples,
-                                         order.stream(), use_copy_kernel);
+  std::optional<int> dst_dev_id;
+  if (std::is_same_v<DstBackend, GPUBackend>)
+    dst_dev_id = dst.device_id();
+
+  type_info.Copy<DstBackend, SrcBackend>(
+      dsts.data(), dst_dev_id,
+      src, src_dev_id,
+      sizes.data(), num_samples,
+      order.stream(), use_copy_kernel);
 }
 
 
@@ -123,7 +101,9 @@ void CopySamplewiseImpl(DstBatch<DstBackend> &dst, const void *src, const TypeIn
  * Assumes matching shapes and types.
  */
 template <typename DstBackend, typename SrcBackend, template <typename> typename SrcBatch>
-void CopySamplewiseImpl(void *dst, const SrcBatch<SrcBackend> &src, const TypeInfo &type_info,
+void CopySamplewiseImpl(void *dst, std::optional<int> dst_dev_id,
+                        const SrcBatch<SrcBackend> &src,
+                        const TypeInfo &type_info,
                         AccessOrder order, bool use_copy_kernel = false) {
   auto num_samples = src.num_samples();
   BatchVector<const void *> srcs;
@@ -135,8 +115,15 @@ void CopySamplewiseImpl(void *dst, const SrcBatch<SrcBackend> &src, const TypeIn
     sizes.push_back(src.shape()[i].num_elements());
   }
 
-  type_info.Copy<DstBackend, SrcBackend>(dst, srcs.data(), sizes.data(), num_samples,
-                                         order.stream(), use_copy_kernel);
+  std::optional<int> src_dev_id;
+  if (std::is_same_v<SrcBackend, GPUBackend>)
+    src_dev_id = src.device_id();
+
+  type_info.Copy<DstBackend, SrcBackend>(
+      dst, dst_dev_id,
+      srcs.data(), src_dev_id,
+      sizes.data(), num_samples,
+      order.stream(), use_copy_kernel);
 }
 
 /**
@@ -147,24 +134,31 @@ template <typename DstBackend, typename SrcBackend, template <typename> typename
           template <typename> typename SrcBatch>
 void CopyImpl(DstBatch<DstBackend> &dst, const SrcBatch<SrcBackend> &src, const TypeInfo &type_info,
               AccessOrder copy_order, bool use_copy_kernel = false) {
+  std::optional<int> dst_dev_id;
+  if (std::is_same_v<DstBackend, GPUBackend>)
+    dst_dev_id = dst.device_id();
+  std::optional<int> src_dev_id;
+  if (std::is_same_v<SrcBackend, GPUBackend>)
+    src_dev_id = src.device_id();
   if (dst.IsContiguous() && src.IsContiguous()) {
-    type_info.Copy<DstBackend, SrcBackend>(contiguous_raw_mutable_data(dst),
-                                           contiguous_raw_data(src),
-                                           dst.shape().num_elements(), copy_order.stream(),
-                                           use_copy_kernel);
+    type_info.Copy<DstBackend, SrcBackend>(
+      contiguous_raw_mutable_data(dst),
+      dst_dev_id,
+      contiguous_raw_data(src),
+      src_dev_id,
+      dst.shape().num_elements(), copy_order.stream(),
+      use_copy_kernel);
   } else if (dst.IsContiguous() && !src.IsContiguous()) {
-    copy_impl::CopySamplewiseImpl<DstBackend, SrcBackend>(contiguous_raw_mutable_data(dst), src,
-                                                          type_info, copy_order, use_copy_kernel);
+    copy_impl::CopySamplewiseImpl<DstBackend, SrcBackend>(
+        contiguous_raw_mutable_data(dst), dst_dev_id, src, type_info, copy_order, use_copy_kernel);
   } else if (!dst.IsContiguous() && src.IsContiguous()) {
-    copy_impl::CopySamplewiseImpl<DstBackend, SrcBackend>(dst, contiguous_raw_data(src), type_info,
-                                                          copy_order, use_copy_kernel);
+    copy_impl::CopySamplewiseImpl<DstBackend, SrcBackend>(
+        dst, contiguous_raw_data(src), src_dev_id, type_info, copy_order, use_copy_kernel);
   } else {
-    copy_impl::CopySamplewiseImpl<DstBackend, SrcBackend>(dst, src, type_info, copy_order,
-                                                          use_copy_kernel);
+    copy_impl::CopySamplewiseImpl<DstBackend, SrcBackend>(
+        dst, src, type_info, copy_order, use_copy_kernel);
   }
 }
-
-/** @} */  // end of copy_impl
 
 }  // namespace copy_impl
 
@@ -183,10 +177,42 @@ TensorList<Backend>::TensorList(int batch_size) : curr_num_tensors_(0) {
   resize_tensors(batch_size);
 }
 
+template <typename Backend>
+TensorList<Backend>::TensorList(const Tensor<Backend> &sample, int num_samples) {
+  assert(num_samples >= 0);
+  SetContiguity(num_samples <= 1 ? BatchContiguity::Contiguous : BatchContiguity::Noncontiguous);
+  set_sample_dim(sample.shape().sample_dim());
+  resize_tensors(num_samples);
+  order_ = sample.order();
+  type_ = sample.type_info();
+  layout_ = sample.GetLayout();
+  pinned_ = sample.is_pinned();
+  device_ = sample.device_id();
+  shape_ = uniform_list_shape(num_samples, sample.shape());
+  if (num_samples > 1) {  // multiple samples - non-contiguous list, repeating one sample
+    for (int i = 0; i < num_samples; i++) {
+      tensors_[i].ShareData(sample);
+      tensors_[i].set_order(order(), false);
+    }
+    order().wait(sample.order());
+  } else if (num_samples > 0) {  // just one sample
+    contiguous_buffer_.ShareData(sample);
+    contiguous_buffer_.set_order(order(), false);
+    order().wait(sample.order());
+    SetMeta(0, sample.GetMeta());
+    recreate_views();
+  }
+}
 
 template <typename Backend>
 TensorList<Backend>::TensorList(TensorList<Backend> &&other) noexcept {
   *this = std::move(other);
+}
+
+template <typename Backend>
+TensorList<Backend>::~TensorList() {
+  DomainTimeRange r(std::is_same_v<Backend, GPUBackend> ? "~TensorList<GPU>" : "~TensorList<CPU>");
+  Reset();
 }
 
 
@@ -231,9 +257,11 @@ void TensorList<Backend>::VerifySampleShareCompatibility(DALIDataType type, int 
                            this->GetLayout(), ", new: ", layout, " or come with empty layout ",
                            error_suffix));
 
-  DALI_ENFORCE(this->is_pinned() == pinned,
-               make_string("Sample must have the same pinned status as target batch, current: ",
-                           this->is_pinned(), ", new: ", pinned, error_suffix));
+  if constexpr (std::is_same_v<Backend, CPUBackend>) {
+    DALI_ENFORCE(this->is_pinned() == pinned,
+                 make_string("Sample must have the same pinned status as target batch, current: ",
+                             this->is_pinned(), ", new: ", pinned, error_suffix));
+  }
 
   DALI_ENFORCE(this->device_id() == device_id,
                make_string("Sample must have the same device id as target batch, current: ",
@@ -460,6 +488,21 @@ std::vector<size_t> TensorList<Backend>::_chunks_capacity() const {
   return result;
 }
 
+inline bool set_deletion_order(
+    const std::shared_ptr<void> &ptr,
+    AccessOrder order,
+    int max_use_count) {
+  if (ptr.use_count() <= max_use_count && order.has_value()) {
+    if (auto *del = std::get_deleter<mm::AsyncDeleter>(ptr)) {
+      del->release_on_stream = order.get();
+      if (ptr.use_count() > max_use_count)
+        throw std::logic_error("Race condition detected - the pointer use count increased.");
+      return true;
+    }
+  }
+  return false;
+}
+
 template <typename Backend>
 void TensorList<Backend>::set_order(AccessOrder order, bool synchronize) {
   DALI_ENFORCE(order, "Resetting order to an empty one is not supported");
@@ -485,6 +528,13 @@ void TensorList<Backend>::set_order(AccessOrder order, bool synchronize) {
   for (auto &t : tensors_)
     t.set_order(order, false);
   order_ = order;
+
+  if (IsContiguous() && contiguous_buffer_.data_) {
+    // If the contiguous buffer is shared only by the sample views, we can safely switch the
+    // deletion order.
+    int max_uses = 1 + num_samples();
+    set_deletion_order(contiguous_buffer_.data_, order, max_uses);
+  }
 }
 
 
@@ -775,8 +825,20 @@ void TensorList<Backend>::DoMakeNoncontiguous() {
 
 template <typename Backend>
 void TensorList<Backend>::Reset() {
-  contiguous_buffer_.reset();
-  // TODO(klecki): Is there any benefit to call Reset on all?
+  if (contiguous_buffer_.data_) {
+    // Optimization: prevent per-sample synchronization for samples sharing the buffer
+    // with the batch.
+    for (auto &t : tensors_) {
+      if (t.order_ == order_ && same_managed_object(t.data_, contiguous_buffer_.data_)) {
+        // reset the internal pointer - we're still holding a reference
+        t.data_.reset();
+      }
+    }
+
+    contiguous_buffer_.reset();
+  }
+
+  // Clear the tensors - after the code above they might be in an inconsistent state.
   tensors_.clear();
 
   curr_num_tensors_ = 0;
@@ -800,19 +862,18 @@ void TensorList<Backend>::Copy(const TensorList<SrcBackend> &src, AccessOrder or
     // no copying to do
     return;
   }
-  if (std::is_same_v<Backend, CPUBackend> &&
-      std::is_same_v<SrcBackend, CPUBackend>) {
-    DALI_ENFORCE(!order.is_device(),
-      "Cannot run a host-to-host copy on a device stream.");
-    if (!order)
-      order = AccessOrder::host();
-  }
+  CUDAStreamLease lease;
+  auto [copy_order, device_id] = copy_impl::GetCopyOrderAndDevice<Backend, SrcBackend>(
+    this->order(), this->device_id(), src.order(), src.device_id(), std::move(order), lease);
+  // from now on, use `copy_order`, not `order`
+
+  DeviceGuard dg(device_id);
 
   Resize(src.shape(), src.type());
   // After resize the state_, curr_num_tensors_, type_, sample_dim_, shape_ (and pinned)
   // postconditions are met, as well as the buffers are correctly adjusted.
 
-  auto copy_order = copy_impl::SyncBefore(this->order(), src.order(), order);
+  copy_impl::SyncBefore(this->order(), src.order(), copy_order);
 
   use_copy_kernel &= (std::is_same<SrcBackend, GPUBackend>::value || src.is_pinned()) &&
                      (std::is_same<Backend, GPUBackend>::value || this->is_pinned());

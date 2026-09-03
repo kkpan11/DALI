@@ -1,4 +1,4 @@
-# Copyright (c) 2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2024, 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -24,7 +24,6 @@ from nvidia.dali.pipeline import do_not_convert
 from nose2.tools import params
 from test_utils import load_test_operator_plugin
 from nvidia.dali.pipeline.experimental import pipeline_def as pipeline_def_experimental
-
 
 load_test_operator_plugin()
 
@@ -170,9 +169,11 @@ def test_trace_push_current(test_mode):
 
     pipe = Pipeline(batch_size=2, num_threads=1, device_id=0)
     Pipeline.push_current(pipe)
-    dn = origin_trace()
-    pipe.set_outputs(dn)
-    Pipeline.pop_current()
+    try:
+        dn = origin_trace()
+        pipe.set_outputs(dn)
+    finally:
+        Pipeline.pop_current()
 
     dali_tbs = capture_dali_traces(lambda: pipe)
 

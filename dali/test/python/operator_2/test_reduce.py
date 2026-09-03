@@ -102,7 +102,7 @@ class Batch3DOverflow(Batch3D):
 
         for batch in self._data:
             for sample in batch:
-                sample *= 100000
+                sample[...] = (sample.astype(np.int64) * 100000).astype(sample.dtype)
 
 
 class Batch3DNegativeAxes(Batch3D):
@@ -346,7 +346,7 @@ def test_sum_with_output_type():
         for batch_gen in batch_gens:
             for type_map in types:
                 input_type = type_map[0]
-                keep_dims = np.random.choice([False, True])
+                keep_dims = bool(np.random.choice([False, True]))
                 for output_type in type_map[1]:
                     layout = rng.choice([None, "RGB"])
                     yield (

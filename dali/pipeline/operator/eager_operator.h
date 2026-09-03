@@ -1,4 +1,4 @@
-// Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -39,7 +39,7 @@ namespace dali {
 
 template <typename Backend>
 std::shared_ptr<TensorList<Backend>> AsContiguousOutput(std::shared_ptr<TensorList<Backend>> in) {
-  if (in->IsContiguous()) {
+  if (in->IsContiguousInMemory()) {
     return in;
   } else {
     auto result = std::make_shared<TensorList<Backend>>();
@@ -106,6 +106,7 @@ class DLL_PUBLIC EagerOperator {
       : max_batch_size_(spec.GetArgument<int>("max_batch_size")),
         op_spec_(spec),
         name_(std::move(name)) {
+    op_spec_.AddArg("__debug", true);
     op_spec_.AddArg("num_threads", num_threads);
     op_ = InstantiateOperator(op_spec_);
     num_outputs_ = op_spec_.GetSchema().CalculateOutputs(op_spec_) +
@@ -140,8 +141,8 @@ class DLL_PUBLIC EagerOperator {
   DLL_PUBLIC inline static void UpdateThreadPool(int num_threads) {
     std::lock_guard lock(shared_thread_pool_mutex_);
 
-    SharedThreadPoolInstance().reset(
-        new ThreadPool(num_threads, CPU_ONLY_DEVICE_ID, false, "EagerOperator"));
+    SharedThreadPoolInstance() = std::make_unique<OldThreadPool>(
+        num_threads, CPU_ONLY_DEVICE_ID, false, "EagerOperator");
   }
 
   // Update shared CUDA stream used for all direct operators.
@@ -170,7 +171,7 @@ class DLL_PUBLIC EagerOperator {
   }
 
   static inline std::shared_ptr<ThreadPool> &SharedThreadPoolInstance() {
-    static std::shared_ptr<ThreadPool> thread_pool = std::make_shared<ThreadPool>(
+    static std::shared_ptr<ThreadPool> thread_pool = std::make_shared<OldThreadPool>(
         GetDefaultNumThreads(), CPU_ONLY_DEVICE_ID, false, "EagerOperator");
 
     return thread_pool;
@@ -261,6 +262,7 @@ EagerOperator<Backend>::RunImpl(
   DALI_ENFORCE(batch_size <= max_batch_size_,
                make_string("Expected batch size lower or equal to max batch size. Requested: ",
                            batch_size, " > ", max_batch_size_));
+  bool is_split_or_merge = IsSplitOrMerge(op_spec_.GetSchema());
   // Convert and add inputs to the workspace.
   for (size_t in_idx = 0; in_idx < inputs.size(); ++in_idx) {
     auto tensor_in = std::make_shared<WSInputType>();
@@ -271,7 +273,7 @@ EagerOperator<Backend>::RunImpl(
       batch_size = cur_batch_size;
     }
 
-    if (!IsSplitOrMerge(op_spec_.GetSchema())) {
+    if (!is_split_or_merge) {
       DALI_ENFORCE(cur_batch_size == batch_size,
                    make_string("Expected uniform batch size in a single operator. Expected: ",
                                batch_size, ", input ", in_idx, " batch size: ", cur_batch_size));
@@ -307,14 +309,19 @@ EagerOperator<Backend>::RunImpl(
   ws_.SetBatchSizes(batch_size);
 
   // Setup outputs.
-  if (op_->Setup(output_desc, ws_)) {
+  if (batch_size || is_split_or_merge) {
+    if (op_->Setup(output_desc, ws_)) {
+      for (size_t i = 0; i < num_outputs_; ++i) {
+        ws_.Output<OutBackend>(i).Resize(output_desc[i].shape, output_desc[i].type,
+                                                  BatchContiguity::Contiguous);
+      }
+    }
+    op_->Run(ws_);
+  } else {
     for (size_t i = 0; i < num_outputs_; ++i) {
-      ws_.Output<OutBackend>(i).Resize(output_desc[i].shape, output_desc[i].type,
-                                                BatchContiguity::Contiguous);
+      ws_.Output<OutBackend>(i).Reset();
     }
   }
-
-  op_->Run(ws_);
 
   for (size_t i = 0; i < num_outputs_; ++i) {
     outputs[i] = AsContiguousOutput<OutBackend>(ws_.template OutputPtr<OutBackend>(i));

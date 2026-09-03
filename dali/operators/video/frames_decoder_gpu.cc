@@ -1,4 +1,4 @@
-// Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -357,14 +357,18 @@ cudaVideoCodec FramesDecoderGpu::GetCodecType(AVCodecID codec_id) const {
     case AV_CODEC_ID_AV1: return cudaVideoCodec_AV1;
     default: {
       DALI_FAIL(make_string("Unsupported codec type ", avcodec_get_name(codec_id)));
-      return {};
     }
   }
 }
 
+bool FramesDecoderGpu::IsFullRange(CUVIDEOFORMAT *video_format) const {
+  return video_format->video_signal_description.video_full_range_flag ||
+         codec_params_->color_range == AVCOL_RANGE_JPEG;
+}
+
 void FramesDecoderGpu::InitGpuDecoder(CUVIDEOFORMAT *video_format) {
   if (!nvdecode_state_->decoder) {
-    bool is_full_range = video_format->video_signal_description.video_full_range_flag;
+    bool is_full_range = IsFullRange(video_format);
     conversion_type_ = image_type_ == DALI_RGB ?
                            is_full_range ? VIDEO_COLOR_SPACE_CONVERSION_TYPE_YUV_TO_RGB_FULL_RANGE :
                                            VIDEO_COLOR_SPACE_CONVERSION_TYPE_YUV_TO_RGB :
@@ -650,7 +654,7 @@ bool FramesDecoderGpu::ReadNextFrameWithoutIndex(uint8_t *data) {
   current_copy_to_output_ = data != nullptr;
   current_frame_output_ = data;
 
-  int frame_to_return_index = -1;
+  int64_t frame_to_return_index = -1;
 
   // Handle the case, when packet has more frames that we have empty spots
   // in the buffer.

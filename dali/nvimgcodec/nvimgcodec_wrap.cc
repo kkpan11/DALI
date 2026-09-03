@@ -1,4 +1,4 @@
-// Copyright (c) 2021-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2021-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,12 +22,20 @@
 #include <unordered_map>
 #include <stdexcept>
 
+#include "dali/core/format.h"
+
 #define STR_IMPL_(x) #x
 #define STR(x) STR_IMPL_(x)
 #define FULL_VER_STR               \
-  STR(NVIMGCODEC_EXT_API_VER_MAJOR) \
-  "." STR(NVIMGCODEC_EXT_API_VER_MINOR) "." STR(NVIMGCODEC_EXT_API_VER_PATCH)
-#define MAJOR_VER_STR STR(NVIMGCODEC_EXT_API_VER_MAJOR)
+  STR(NVIMGCODEC_VER_MAJOR) \
+  "." STR(NVIMGCODEC_VER_MINOR) "." STR(NVIMGCODEC_VER_PATCH)
+#define MAJOR_VER_STR STR(NVIMGCODEC_VER_MAJOR)
+
+#if FOR_CONDA_ENABLED
+#define NVIMGCODEC_DEFAULT_LIBRARY_DIR "lib"
+#else
+#define NVIMGCODEC_DEFAULT_LIBRARY_DIR "lib64"
+#endif
 
 namespace {
 
@@ -37,11 +45,13 @@ const char nvimgcodecLibNameFullVer[] = "libnvimgcodec.so." FULL_VER_STR;
 const char nvimgcodecLibNameMajorVer[] = "libnvimgcodec.so." MAJOR_VER_STR;
 const char nvimgcodecLibName[] = "libnvimgcodec.so";
 const char nvimgcodecLibDefaultPathFullVer[] =
-    NVIMGCODEC_DEFAULT_INSTALL_PATH "/lib64/libnvimgcodec.so." FULL_VER_STR;
+    NVIMGCODEC_DEFAULT_INSTALL_PATH "/" NVIMGCODEC_DEFAULT_LIBRARY_DIR
+    "/libnvimgcodec.so." FULL_VER_STR;
 const char nvimgcodecLibDefaultPathMajorVer[] =
-    NVIMGCODEC_DEFAULT_INSTALL_PATH "/lib64/libnvimgcodec.so." MAJOR_VER_STR;
+    NVIMGCODEC_DEFAULT_INSTALL_PATH "/" NVIMGCODEC_DEFAULT_LIBRARY_DIR
+    "/libnvimgcodec.so." MAJOR_VER_STR;
 const char nvimgcodecLibDefaultPath[] =
-    NVIMGCODEC_DEFAULT_INSTALL_PATH "/lib64/libnvimgcodec.so";
+    NVIMGCODEC_DEFAULT_INSTALL_PATH "/" NVIMGCODEC_DEFAULT_LIBRARY_DIR "/libnvimgcodec.so";
 
 NVIMGCODECDRIVER loadNvimgcodecLibrary() {
   static const char *paths[] = {nvimgcodecLibNameFullVer,
@@ -51,18 +61,34 @@ NVIMGCODECDRIVER loadNvimgcodecLibrary() {
                                 nvimgcodecLibDefaultPathMajorVer,
                                 nvimgcodecLibDefaultPath};
   NVIMGCODECDRIVER ret = nullptr;
+  std::string attempts;
+  // Clear any pending dlerror() before the loop so the first dlerror() call
+  // we make corresponds to our own dlopen failure, not a prior unrelated one.
+  (void)dlerror();
   for (const char *path : paths) {
     ret = dlopen(path, RTLD_NOW);
     if (ret)
       break;
+    const char *err = dlerror();
+    attempts += "\n  ";
+    attempts += path;
+    attempts += ": ";
+    attempts += err ? err : "(unknown dlerror)";
   }
 
   if (!ret) {
-    int cuda_version_major = CUDA_VERSION / 1000;  // 11020 -> 11, 12000 -> 12
+#if FOR_CONDA_ENABLED
     throw std::runtime_error(
+        "dlopen libnvimgcodec.so failed!. Please install "
+        "libnvimgcodec: `conda install -c conda-forge libnvimgcodec`.");
+#else
+    int cuda_version_major = CUDA_VERSION / 1000;  // 11020 -> 11, 12000 -> 12
+    throw std::runtime_error(dali::make_string(
         "dlopen libnvimgcodec.so failed!. Please install nvimagecodec: See "
         "https://developer.nvidia.com/nvimgcodec-downloads or simply do `pip install "
-        "nvidia-nvimgcodec-cu" + std::to_string(cuda_version_major) + "`.");
+        "nvidia-nvimgcodec-cu", cuda_version_major, "`."
+        "\nAttempted paths:", attempts));
+#endif
   }
   return ret;
 }

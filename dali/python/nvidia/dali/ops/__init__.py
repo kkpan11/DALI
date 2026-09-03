@@ -1,4 +1,4 @@
-# Copyright (c) 2017-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2017-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,7 +15,7 @@
 # pylint: disable=no-member
 import sys
 import threading
-import tree
+import optree
 import warnings
 import weakref
 from itertools import count
@@ -290,9 +290,16 @@ def _process_argument_inputs(schema, spec, kwargs, operator_name):
         # TODO(klecki): For MIS we can extract this step outside and do it once
         arg_inp = _handle_constant(arg_inp, "cpu", k, operator_name)
 
+        if arg_inp.device != "cpu":
+            raise ValueError(
+                f"Invalid device \"{arg_inp.device}\" for argument '{k}' of operator "
+                f"'{operator_name}'. "
+                f"Named arguments must be on CPU."
+            )
+
         _check_arg_input(schema, operator_name, k)
 
-        spec.AddArgumentInput(k, arg_inp.name)
+        spec.AddArgumentInput(k, arg_inp.name, arg_inp.ndim, arg_inp.dtype, arg_inp.layout)
         result.append(arg_inp)
     return result
 
@@ -317,7 +324,7 @@ def _process_inputs(schema, spec, inputs, operator_name):
     for inp in inputs:
         if not isinstance(inp, _DataNode):
             raise TypeError(f"Expected inputs of type 'DataNode'. Received input of type '{inp}'.")
-        spec.AddInput(inp.name, inp.device)
+        spec.AddInput(inp.name, inp.device, inp.ndim, inp.dtype, inp.layout)
     return list(inputs)
 
 
@@ -462,15 +469,15 @@ class _OperatorInstance(object):
 
         if num_output == 0 and self._op.preserve:
             t_name = type(self._op).__name__ + "_id_" + str(self.id) + "_sink"
-            pipeline.add_sink(_DataNode(t_name, output_device, self))
+            pipeline.add_sink(_DataNode(t_name, output_device, self, None))
             return
 
         for i in range(num_output):
             t_name = self._name
             if num_output > 1:
                 t_name += "[{}]".format(i)
-            t = _DataNode(t_name, output_device, self)
-            self._spec.AddOutput(t.name, t.device)
+            self._spec.AddOutput(t_name, output_device)
+            t = _DataNode(t_name, output_device, self, i)
             if self._op.preserve:
                 pipeline.add_sink(t)
             self.append_output(t)
@@ -531,7 +538,7 @@ class _OperatorInstance(object):
 class _DaliOperatorMeta(type):
     @property
     def __doc__(self):
-        return _docs._docstring_generator(_names._schema_name(self))
+        return _docs._docstring_generator_class(_names._schema_name(self))
 
 
 def _check_arg_input(schema, op_name, name):
@@ -688,14 +695,16 @@ def python_op_factory(name, schema_name, internal_schema_name=None, generated=Tr
 
         Operator.__init__.__signature__ = _signatures._call_signature(
             schema,
+            "ops",
             include_inputs=False,
             include_kwargs=True,
             include_self=True,
-            data_node_return=False,
+            return_annotation=False,
             all_args_optional=True,
         )
         Operator.__call__.__signature__ = _signatures._call_signature(
             schema,
+            "ops",
             include_inputs=True,
             include_kwargs=True,
             include_self=True,
@@ -720,6 +729,10 @@ def _load_ops():
         # with register_xxx_op(). Now it relies on those class being present in this module
         # at the time of registration.
         schema = _b.TryGetSchema(op_reg_name)
+        # The ops that should be hidden from the documentation land in hidden module,
+        # and are rexported in the original module, making the actual module and
+        # the __module__ attribute mismatch.
+        # This prevents Sphinx from autodocing the operator.
         make_hidden = schema.IsDocHidden() if schema else False
         _, submodule, op_name = _process_op_name(op_reg_name, make_hidden)
         module = _internal.get_submodule(ops_module, submodule)
@@ -811,10 +824,10 @@ def _preprocess_inputs(inputs, op_name, device, schema=None):
     def get_input_device(schema, input_idx):
         default_input_device = "gpu" if device == "gpu" else "cpu"
         if schema:
-            input_device = schema.GetInputDevice(input_idx) or default_input_device
+            input_device = schema.GetInputDevice(input_idx, None, default_input_device)
         else:
             input_device = default_input_device
-        return input_device
+        return input_device or default_input_device
 
     def _promote_scalar_constant(value, input_device):
         """When ScalarConstant is encountered, promote it to a DataNode, otherwise do
@@ -840,7 +853,7 @@ def _preprocess_inputs(inputs, op_name, device, schema=None):
             dev = get_input_device(schema, idx)
             # Process the single ScalarConstant or list possibly containing ScalarConstants
             # and promote each of them into a DataNode
-            inp = tree.map_structure(lambda val: _promote_scalar_constant(val, dev), inp)
+            inp = optree.tree_map(lambda val: _promote_scalar_constant(val, dev), inp)
 
         inputs[idx] = inp
     return inputs
@@ -880,7 +893,6 @@ from nvidia.dali.ops._operators.math import (  # noqa: F401, E402
     _group_inputs,
     _generate_input_desc,
 )
-
 
 # Discover and generate bindings for all regular operators.
 _load_ops()

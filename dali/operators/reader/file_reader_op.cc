@@ -1,4 +1,4 @@
-// Copyright (c) 2017-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2017-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -98,6 +98,22 @@ This argument is mutually exclusive with `files`.)", nullptr)
 
 `stick_to_shard` and `random_shuffle` cannot be used when this argument is set to True.)",
       false)
+  .AddOptionalArg<int64_t>("shuffle_after_epoch_seed",
+      R"(Random seed for the dataset shuffling performed after each epoch.
+
+If not provided, a fixed default seed is used, which results in the same shuffling
+pattern across different training runs. Providing a custom seed allows for different
+shuffle patterns across training runs, which may be desirable for better statistical
+properties.
+
+.. note::
+    When using multiple DALI pipelines (e.g., for multi-GPU training), all pipeline
+    instances should use the same `shuffle_after_epoch_seed` to ensure a consistent
+    global shuffle across all shards.
+
+.. note::
+    This argument has no effect unless `shuffle_after_epoch` is set to ``True``.)",
+      nullptr, false)
   .AddOptionalArg<vector<string>>("files", R"(A list of file paths to read the data from.
 
 If `file_root` is provided, the paths are treated as being relative to it.
@@ -120,6 +136,10 @@ list of sub-directories under `file_root`.
 This argument is ignored when file paths are taken from `file_list` or `files`.)", nullptr)
   .AddOptionalArg<bool>("case_sensitive_filter", R"(If set to True, the filter will be matched
 case-sensitively, otherwise case-insensitively.)", false)
+  .OutputDType(0, DALI_UINT8)
+  .OutputDType(1, DALI_INT32)
+  .OutputNDim(0, 1)
+  .OutputNDim(1, 1)
   .AddParent("LoaderBase");
 
 
@@ -131,11 +151,12 @@ DALI_SCHEMA(FileReader)
     .NumInput(0)
     .NumOutput(2)  // (Images, Labels)
     .AddParent("readers__File")
-    .MakeDocPartiallyHidden()
+    .MakeDocHidden()
     .Deprecate(
+        "1.0",
         "readers__File",
         R"code(In DALI 1.0 all readers were moved into a dedicated :mod:`~nvidia.dali.fn.readers`
 submodule and renamed to follow a common pattern. This is a placeholder operator with identical
-functionality to allow for backward compatibility.)code");  // Deprecated in 1.0;
+functionality to allow for backward compatibility.)code");
 
 }  // namespace dali

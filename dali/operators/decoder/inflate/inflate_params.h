@@ -1,4 +1,4 @@
-// Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2022, 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -36,6 +36,7 @@ constexpr static const char *offsetArgName = "chunk_offsets";
 constexpr static const char *sizeArgName = "chunk_sizes";
 constexpr static const char *layoutArgName = "layout";
 constexpr static const char *sequenceLayoutArgName = "sequence_axis_name";
+constexpr static const char *checkOutputSizeArgName = "check_output_size";
 
 enum class InflateAlg {
   LZ4
@@ -82,6 +83,10 @@ class ShapeParams {
 
   auto GetMaxOutChunkVol() const {
     return max_output_sample_vol_;
+  }
+
+  auto GetMaxOutVol() const {
+    return max_output_vol_;
   }
 
   auto GetTotalChunkNum() const {
@@ -349,6 +354,8 @@ class ShapeParams {
     }
     int sample_dim = provided_shape[0].num_elements();
     TensorListShape<> shape(num_samples, sample_dim);
+    max_output_vol_ = 0;
+    max_output_sample_vol_ = 0;
     for (int sample_idx = 0; sample_idx < provided_shape.num_samples(); sample_idx++) {
       const int *data = provided_shape.tensor_data(sample_idx);
       for (int d = 0; d < sample_dim; d++) {
@@ -360,6 +367,7 @@ class ShapeParams {
       }
       TensorShape<> sample_shape(data, data + sample_dim);
       max_output_sample_vol_ = std::max(max_output_sample_vol_, volume(sample_shape));
+      max_output_vol_ += volume(sample_shape);
       shape.set_tensor_shape(sample_idx, sample_shape);
     }
     return shape;
@@ -378,6 +386,7 @@ class ShapeParams {
   std::vector<size_t> sizes_;
 
   int64_t max_output_sample_vol_;
+  int64_t max_output_vol_;
   TensorListShape<> output_shape_;
   TensorLayout output_layout_ = "";
 };

@@ -1,4 +1,4 @@
-# Copyright (c) 2023-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2023-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,17 +11,20 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import functools
+
+import numpy as np
 import jax
 import jax.dlpack
 import jax.numpy as jnp
-from jax.sharding import NamedSharding, PositionalSharding, Sharding
+from jax.sharding import NamedSharding, Sharding
 
 from nvidia.dali.plugin.base_iterator import _DaliBaseIterator
 from nvidia.dali.plugin.base_iterator import LastBatchPolicy
 from nvidia.dali.pipeline import pipeline_def
 from nvidia.dali.pipeline import Pipeline, DataNode
 
-from nvidia.dali.plugin.jax.integration import _to_jax_array
+from nvidia.dali.plugin.jax.integration import _to_jax_array, _jax_device
 
 from typing import Union, Optional, Callable, Type, Dict, List, Tuple
 
@@ -42,18 +45,18 @@ class DALIGenericIterator(_DaliBaseIterator):
                 of those names.
                 Each name should be distinct
     size : int, default = -1
-                Number of samples in the shard for the wrapped pipeline (if there is more than
-                one it is a sum)
-                Providing -1 means that the iterator will work until StopIteration is raised
-                from the inside of iter_setup(). The options `last_batch_policy` and
-                `last_batch_padded` don't work in such case. It works with only one pipeline inside
-                the iterator.
-                Mutually exclusive with `reader_name` argument
+                Number of samples in the shard. For multiple pipelines, this is the sum of
+                their shard sizes.
+                Mutually exclusive with `reader_name`. When left at -1 without
+                `reader_name`, a single-pipeline iterator reads until the pipeline raises
+                `StopIteration`, for example when an external source is exhausted;
+                `last_batch_policy` and `last_batch_padded` do not apply.
     reader_name : str, default = None
-                Name of the reader which will be queried for the shard size, number of shards and
-                all other properties necessary to count properly the number of relevant and padded
-                samples that iterator needs to deal with. It automatically sets `last_batch_padded`
-                accordingly to match the reader's configuration.
+                Name of the reader operator that determines the iterator length and
+                last-batch padding. It must match the reader's `name` argument in every
+                supplied pipeline.
+                When set, `size` and `last_batch_padded` are determined automatically and
+                must not be provided. It does not change `last_batch_policy`.
     auto_reset : string or bool, optional, default = False
                 Whether the iterator resets itself for the next epoch or it requires reset() to be
                 called explicitly.
@@ -69,15 +72,11 @@ class DALIGenericIterator(_DaliBaseIterator):
                 to fully fill it. See :meth:`nvidia.dali.plugin.base_iterator.LastBatchPolicy`.
                 JAX iterator does not support LastBatchPolicy.PARTIAL
     last_batch_padded : bool, optional, default = False
-                Whether the last batch provided by DALI is padded with the last sample
-                or it just wraps up. In the conjunction with `last_batch_policy` it tells
-                if the iterator returning last batch with data only partially filled with
-                data from the current epoch is dropping padding samples or samples from
-                the next epoch. If set to ``False`` next
-                epoch will end sooner as data from it was consumed but dropped. If set to
-                True next epoch would be the same length as the first one. For this to happen,
-                the option `pad_last_batch` in the reader needs to be set to True as well.
-                It is overwritten when `reader_name` argument is provided
+                Whether the reader pads the last batch by repeating its last sample
+                (`True`) or continues into the next epoch (`False`).
+                Without `reader_name`, set this to the same value as the reader's
+                `pad_last_batch` argument. With `reader_name`, it is determined
+                automatically and must not be provided.
     prepare_first_batch : bool, optional, default = True
                 Whether DALI should buffer the first batch right after the creation of the iterator,
                 so one batch is already prepared when the iterator is prompted for the data
@@ -85,6 +84,14 @@ class DALIGenericIterator(_DaliBaseIterator):
                 `jax.sharding.Sharding` compatible object that, if present, will be used to
                 build an output jax.Array for each category. If ``None``, the iterator returns
                 values compatible with pmapped JAX functions, if multiple pipelines are provided.
+    pmap_compatible : bool, optional, default = None
+                Controls whether the iterator produces outputs with a leading device axis
+                compatible with ``jax.pmap``. When ``None`` (default), it is inferred
+                automatically: ``True`` when ``devices`` is provided, ``False`` otherwise.
+                Set to ``True`` explicitly to force pmap-compatible output (shape
+                ``[num_devices, batch_per_device, ...]``) without using the ``devices``
+                argument. Set to ``False`` to suppress the device axis even when ``devices``
+                is provided.
 
     Example
     -------
@@ -117,6 +124,7 @@ class DALIGenericIterator(_DaliBaseIterator):
         last_batch_policy: LastBatchPolicy = LastBatchPolicy.FILL,
         prepare_first_batch: bool = True,
         sharding: Optional[Sharding] = None,
+        pmap_compatible: Optional[bool] = None,
     ):
         # check the assert first as _DaliBaseIterator would run the prefetch
         if len(set(output_map)) != len(output_map):
@@ -126,9 +134,13 @@ class DALIGenericIterator(_DaliBaseIterator):
 
         if sharding is not None:
             assert isinstance(
-                sharding, (NamedSharding, PositionalSharding)
-            ), "`sharding` should be an instance of `NamedSharding` or `PositionalSharding`"
+                sharding, Sharding
+            ), "`sharding` should be an instance of `jax.sharding.Sharding`"
         self._sharding = sharding
+
+        # When pmap_compatible is None (default), auto-infer: False for single-pipeline
+        # iterators. _data_iterator_impl sets True automatically when devices are provided.
+        self._pmap_compatible = pmap_compatible if pmap_compatible is not None else False
 
         assert (
             last_batch_policy != LastBatchPolicy.PARTIAL
@@ -169,7 +181,7 @@ class DALIGenericIterator(_DaliBaseIterator):
         for category_id, category_name in enumerate(self.output_map):
             category_outputs = self._gather_outputs_for_category(pipelines_outputs, category_id)
 
-            if self._num_gpus == 1 and self._sharding is None:
+            if self._num_gpus == 1 and self._sharding is None and not self._pmap_compatible:
                 next_output[category_name] = category_outputs[0]
             else:
                 self._assert_shards_shapes(category_outputs)
@@ -202,27 +214,32 @@ class DALIGenericIterator(_DaliBaseIterator):
         return category_outputs
 
     def _build_output_with_device_put(self, next_output, category_name, category_outputs):
-        """Builds sharded jax.Array with `jax.device_put_sharded`. This output is compatible
-        with pmapped JAX functions.
-        """
-        category_outputs_devices = tuple(
-            map(lambda jax_shard: jax_shard.device(), category_outputs)
-        )
+        """Builds sharded jax.Array from per-device shards using make_array_from_
+        single_device_arrays."""
+        category_outputs_devices = tuple(_jax_device(jax_shard) for jax_shard in category_outputs)
 
         distinct_category_outputs_devices = set(category_outputs_devices)
 
         if len(category_outputs_devices) != len(distinct_category_outputs_devices):
             if len(distinct_category_outputs_devices) != 1:
                 raise AssertionError(
-                    "JAX iterator requires shards to be placed on \
-                                                different devices or all on the same device."
+                    "JAX iterator requires shards to be placed on "
+                    "different devices or all on the same device."
                 )
             else:
                 # All shards are on one device (CPU or one GPU)
                 return jnp.stack(category_outputs)
         else:
-            # Build sharded JAX array as output for current category (compatible with pmap)
-            return jax.device_put_sharded(category_outputs, category_outputs_devices)
+            # Build sharded JAX array as output for current category (compatible with pmap).
+            # Use stacked shape (num_devices, batch_per_device, ...) so that
+            # arr[device_id] returns the shard for that device, matching
+            # the behaviour of the deprecated jax.device_put_sharded.
+            devices_arr = np.array(list(category_outputs_devices))
+            mesh = jax.sharding.Mesh(devices_arr, axis_names=("device",))
+            sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("device"))
+            global_shape = (len(category_outputs), *category_outputs[0].shape)
+            expanded_shards = [jnp.expand_dims(s, 0) for s in category_outputs]
+            return jax.make_array_from_single_device_arrays(global_shape, sharding, expanded_shards)
 
     def _build_output_with_sharding(self, category_outputs):
         """Builds sharded jax.Array with `jax.make_array_from_single_device_arrays`.
@@ -231,9 +248,10 @@ class DALIGenericIterator(_DaliBaseIterator):
         shard_shape = category_outputs[0].shape
 
         if isinstance(self._sharding, NamedSharding):
-            global_shape = (self._sharding.mesh.size * shard_shape[0], *shard_shape[1:])
+            num_devices = self._sharding.mesh.size
         else:
-            global_shape = (self._sharding.shape[0] * shard_shape[0], *shard_shape[1:])
+            num_devices = len(self._sharding.device_set)
+        global_shape = (num_devices * shard_shape[0], *shard_shape[1:])
 
         return jax.make_array_from_single_device_arrays(
             global_shape, self._sharding, category_outputs
@@ -269,6 +287,7 @@ def _data_iterator_impl(
     prepare_first_batch: bool = True,
     sharding: Optional[Sharding] = None,
     devices: Optional[List[jax.Device]] = None,
+    pmap_compatible: Optional[bool] = None,
 ):
     """Implementation of the data_iterator decorator. It is extracted to a separate function
     to be reused by the peekable iterator decorator.
@@ -278,6 +297,7 @@ def _data_iterator_impl(
         raise ValueError("Only one of `sharding` and `devices` arguments can be provided.")
 
     def data_iterator_decorator(func):
+        @functools.wraps(func)
         def create_iterator(*args, checkpoints=None, **wrapper_kwargs):
             pipeline_def_fn = pipeline_def(func)
 
@@ -302,6 +322,7 @@ def _data_iterator_impl(
                     last_batch_padded=last_batch_padded,
                     last_batch_policy=last_batch_policy,
                     prepare_first_batch=prepare_first_batch,
+                    pmap_compatible=pmap_compatible,
                 )
             else:
                 pipelines = []
@@ -356,8 +377,14 @@ def _data_iterator_impl(
                         last_batch_policy=last_batch_policy,
                         prepare_first_batch=prepare_first_batch,
                         sharding=sharding,
+                        pmap_compatible=pmap_compatible,
                     )
                 elif devices is not None:
+                    # Auto-enable pmap_compatible when devices are provided, unless the user
+                    # explicitly overrode it.
+                    effective_pmap_compatible = (
+                        pmap_compatible if pmap_compatible is not None else True
+                    )
                     return iterator_type(
                         pipelines=pipelines,
                         output_map=output_map,
@@ -367,6 +394,7 @@ def _data_iterator_impl(
                         last_batch_padded=last_batch_padded,
                         last_batch_policy=last_batch_policy,
                         prepare_first_batch=prepare_first_batch,
+                        pmap_compatible=effective_pmap_compatible,
                     )
 
                 raise AssertionError(
@@ -389,6 +417,7 @@ def data_iterator(
     prepare_first_batch: bool = True,
     sharding: Optional[Sharding] = None,
     devices: Optional[List[jax.Device]] = None,
+    pmap_compatible: Optional[bool] = None,
 ):
     """Decorator for DALI iterator for JAX. Decorated function when called returns DALI
     iterator for JAX.
@@ -414,18 +443,18 @@ def data_iterator(
                 of those names.
                 Each name should be distinct
     size : int, default = -1
-                Number of samples in the shard for the wrapped pipeline (if there is more than
-                one it is a sum)
-                Providing -1 means that the iterator will work until StopIteration is raised
-                from the inside of iter_setup(). The options `last_batch_policy` and
-                `last_batch_padded` don't work in such case. It works with only one pipeline inside
-                the iterator.
-                Mutually exclusive with `reader_name` argument
+                Number of samples in the shard. For multiple pipelines, this is the sum of
+                their shard sizes.
+                Mutually exclusive with `reader_name`. When left at -1 without
+                `reader_name`, a single-pipeline iterator reads until the pipeline raises
+                `StopIteration`, for example when an external source is exhausted;
+                `last_batch_policy` and `last_batch_padded` do not apply.
     reader_name : str, default = None
-                Name of the reader which will be queried for the shard size, number of shards and
-                all other properties necessary to count properly the number of relevant and padded
-                samples that iterator needs to deal with. It automatically sets `last_batch_padded`
-                accordingly to match the reader's configuration.
+                Name of the reader operator that determines the iterator length and
+                last-batch padding. It must match the reader's `name` argument in every
+                supplied pipeline.
+                When set, `size` and `last_batch_padded` are determined automatically and
+                must not be provided. It does not change `last_batch_policy`.
     auto_reset : string or bool, optional, default = False
                 Whether the iterator resets itself for the next epoch or it requires reset() to be
                 called explicitly.
@@ -441,15 +470,11 @@ def data_iterator(
                 to fully fill it. See :meth:`nvidia.dali.plugin.base_iterator.LastBatchPolicy`.
                 JAX iterator does not support LastBatchPolicy.PARTIAL
     last_batch_padded : bool, optional, default = False
-                Whether the last batch provided by DALI is padded with the last sample
-                or it just wraps up. In the conjunction with `last_batch_policy` it tells
-                if the iterator returning last batch with data only partially filled with
-                data from the current epoch is dropping padding samples or samples from
-                the next epoch. If set to ``False`` next
-                epoch will end sooner as data from it was consumed but dropped. If set to
-                True next epoch would be the same length as the first one. For this to happen,
-                the option `pad_last_batch` in the reader needs to be set to True as well.
-                It is overwritten when `reader_name` argument is provided
+                Whether the reader pads the last batch by repeating its last sample
+                (`True`) or continues into the next epoch (`False`).
+                Without `reader_name`, set this to the same value as the reader's
+                `pad_last_batch` argument. With `reader_name`, it is determined
+                automatically and must not be provided.
     prepare_first_batch : bool, optional, default = True
                 Whether DALI should buffer the first batch right after the creation of the iterator,
                 so one batch is already prepared when the iterator is prompted for the data
@@ -464,6 +489,14 @@ def data_iterator(
                 return outputs compatible with pmapped JAX functions.
                 This argument is  mutually exclusive with `sharding` argument. If `sharding`
                 is provided, `devices` should be set to None.
+    pmap_compatible : bool, optional, default = None
+                Controls whether the iterator produces outputs with a leading device axis
+                compatible with ``jax.pmap``. When ``None`` (default), it is inferred
+                automatically: ``True`` when ``devices`` is provided, ``False`` otherwise.
+                Set to ``True`` explicitly to force pmap-compatible output (shape
+                ``[num_devices, batch_per_device, ...]``) without using the ``devices``
+                argument. Set to ``False`` to suppress the device axis even when ``devices``
+                is provided.
     checkpoints : list of str, optional, default = None
                 Checkpoints obtained with `.checkpoints()` method of the iterator.
                 If provided, they will be used to restore the state of the pipelines.
@@ -499,4 +532,5 @@ def data_iterator(
         prepare_first_batch,
         sharding,
         devices,
+        pmap_compatible,
     )

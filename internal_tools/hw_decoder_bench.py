@@ -1,4 +1,4 @@
-# Copyright (c) 2020-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2020-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,12 +17,12 @@ import nvidia.dali.fn as fn
 import nvidia.dali.types as types
 import statistics
 import time
-from nvidia.dali.pipeline import pipeline_def
 import random
 import numpy as np
 import os
 from nvidia.dali.auto_aug import auto_augment, trivial_augment
-
+from nvidia.dali.pipeline import pipeline_def
+import nvidia.dali.experimental.dynamic as ndd
 
 parser = argparse.ArgumentParser(description="DALI HW decoder benchmark")
 parser.add_argument("-b", dest="batch_size", help="batch size", default=1, type=int)
@@ -44,6 +44,13 @@ parser.add_argument(
     default="4",
     type=str,
 )
+parser.add_argument(
+    "--exec_dynamic",
+    dest="exec_dynamic",
+    help="use dynamic excutor",
+    default=1,
+    type=int,
+)
 input_files_arg = parser.add_mutually_exclusive_group()
 input_files_arg.add_argument("-i", dest="images_dir", help="images dir")
 input_files_arg.add_argument(
@@ -56,7 +63,14 @@ input_files_arg.add_argument(
 parser.add_argument(
     "-p",
     dest="pipeline",
-    choices=["decoder", "rn50", "efficientnet_inference", "vit", "efficientnet_training"],
+    choices=[
+        "decoder",
+        "ndd_rn50",
+        "rn50",
+        "efficientnet_inference",
+        "vit",
+        "efficientnet_training",
+    ],
     help="pipeline to test",
     default="decoder",
     type=str,
@@ -122,8 +136,16 @@ parser.add_argument(
     action="store_true",
     help="If True, uses the experimental decoder instead of the default",
 )
+parser.add_argument(
+    "--ndd-capture",
+    action="store_true",
+    help="Use capture mode for the dynamic pipeline.",
+)
 
 args = parser.parse_args()
+
+if args.ndd_capture and args.pipeline != "ndd_rn50":
+    parser.error("--ndd-capture requires -p ndd_rn50")
 
 
 @pipeline_def(
@@ -131,6 +153,7 @@ args = parser.parse_args()
     num_threads=1,
     device_id=args.device_id,
     seed=0,
+    exec_dynamic=args.exec_dynamic,
 )
 def DecoderPipeline(decoders_module=fn.decoders, hw_load=0):
     device = "mixed" if args.device == "gpu" else "cpu"
@@ -151,6 +174,7 @@ def DecoderPipeline(decoders_module=fn.decoders, hw_load=0):
     num_threads=1,
     device_id=args.device_id,
     seed=0,
+    exec_dynamic=args.exec_dynamic,
 )
 def RN50Pipeline(minibatch_size, decoders_module=fn.decoders, hw_load=0):
     device = "mixed" if args.device == "gpu" else "cpu"
@@ -164,19 +188,96 @@ def RN50Pipeline(minibatch_size, decoders_module=fn.decoders, hw_load=0):
         preallocate_height_hint=args.height_hint,
     )
     images = fn.resize(images, resize_x=224, resize_y=224, minibatch_size=minibatch_size)
-    layout = types.NCHW
-    out_type = types.FLOAT16
     coin_flip = fn.random.coin_flip(probability=0.5)
     images = fn.crop_mirror_normalize(
         images,
-        dtype=out_type,
-        output_layout=layout,
+        dtype=types.FLOAT16,
+        output_layout="CHW",
         crop=(224, 224),
         mean=[0.485 * 255, 0.456 * 255, 0.406 * 255],
         std=[0.229 * 255, 0.224 * 255, 0.225 * 255],
         mirror=coin_flip,
     )
     return images
+
+
+class NDDRN50Pipeline:
+    def __init__(
+        self,
+        minibatch_size,
+        batch_size=args.batch_size,
+        device_id=args.device_id,
+        num_threads=1,
+        decoders_module=fn.decoders,
+        hw_load=0,
+        capture=False,
+    ):
+        self.batch_size = batch_size
+        self.device = args.device
+        self.device_id = device_id
+        self.num_threads = num_threads
+        self.decoders_module = decoders_module
+        self.hw_load = hw_load
+        self.minibatch_size = minibatch_size
+        self.capture = capture
+        self.rng = ndd.random.RNG(seed=42)
+        self.reader = ndd.readers.File(file_root=args.images_dir)
+        self.next_input_data = None
+        self.eval_context = ndd.EvalContext(num_threads=self.num_threads, device_id=self.device_id)
+        self.args = args
+        if capture:
+            self.hw_load = ndd.capture.invariant(self.hw_load)
+            self.minibatch_size = ndd.capture.invariant(self.minibatch_size)
+            self.args = ndd.capture.invariant(self.args)
+
+    def build(self):
+        pass
+
+    def share_outputs(self):
+        with self.eval_context:
+            if self.next_input_data is None:
+                self.next_input_data = iter(
+                    self.reader.next_epoch(batch_size=self.batch_size, capture=self.capture)
+                )
+            try:
+                jpegs, _ = next(self.next_input_data)
+            except StopIteration:
+                self.next_input_data = iter(
+                    self.reader.next_epoch(batch_size=self.batch_size, capture=self.capture)
+                )
+                jpegs, _ = next(self.next_input_data)
+
+            images = self.decoders_module.image_random_crop(
+                jpegs,
+                device=self.device,
+                output_type=types.RGB,
+                hw_decoder_load=self.hw_load,
+                preallocate_width_hint=self.args.width_hint,
+                preallocate_height_hint=self.args.height_hint,
+                rng=self.rng,
+            )
+            coin_flip = ndd.random.coin_flip(
+                batch_size=self.batch_size, probability=0.5, rng=self.rng
+            )
+            images = ndd.resize(
+                images, resize_x=224, resize_y=224, minibatch_size=self.minibatch_size
+            )
+            output = ndd.crop_mirror_normalize(
+                images,
+                dtype=ndd.float16,
+                output_layout="CHW",
+                crop=(224, 224),
+                mean=[0.485 * 255, 0.456 * 255, 0.406 * 255],
+                std=[0.229 * 255, 0.224 * 255, 0.225 * 255],
+                mirror=coin_flip,
+            )
+            return output.evaluate()
+
+    def release_outputs(self):
+        pass
+
+    def schedule_run(self):
+        pass
 
 
 @pipeline_def(
@@ -186,6 +287,7 @@ def RN50Pipeline(minibatch_size, decoders_module=fn.decoders, hw_load=0):
     seed=0,
     enable_conditionals=True,
     decoders_module=fn.decoders,
+    exec_dynamic=args.exec_dynamic,
 )
 def EfficientnetTrainingPipeline(
     minibatch_size,
@@ -194,7 +296,7 @@ def EfficientnetTrainingPipeline(
     hw_load=0,
 ):
     dali_device = args.device
-    output_layout = types.NCHW
+    output_layout = "CHW"
     rng = fn.random.coin_flip(probability=0.5)
 
     jpegs, _ = fn.readers.file(
@@ -235,7 +337,7 @@ def EfficientnetTrainingPipeline(
     images = fn.flip(images, horizontal=rng)
 
     # Based on the specification, apply the automatic augmentation policy. Note, that from
-    # the pointof Pipeline definition, this `if` statement relies on static scalar
+    # the point of Pipeline definition, this `if` statement relies on static scalar
     # parameter, so it is evaluated exactly once during build - we either include automatic
     # augmentations or not.We pass the shape of the image after the resize so
     # the translate operations are done relative to the image size.
@@ -263,6 +365,7 @@ def EfficientnetTrainingPipeline(
     num_threads=1,
     device_id=args.device_id,
     prefetch_queue_depth=1,
+    exec_dynamic=args.exec_dynamic,
 )
 def EfficientnetInferencePipeline(decoders_module=fn.decoders, hw_load=0):
     images = fn.external_source(device="cpu", name=DALI_INPUT_NAME)
@@ -331,6 +434,7 @@ def vit_pipeline(
     num_classes=1000,
     decoders_module=fn.decoders,
     hw_load=0,
+    exec_dynamic=args.exec_dynamic,
 ):
     files_paths = [os.path.join(args.images_dir, f) for f in os.listdir(args.images_dir)]
 
@@ -403,7 +507,12 @@ print(f"Decoder hw load to check: {decoder_hw_load}")
 perf_results = []
 for cpu_num in threads_num:
     for hw_load in decoder_hw_load:
-        decoders_module = fn.experimental.decoders if args.experimental_decoder else fn.decoders
+        if "ndd" in args.pipeline:
+            decoders_module = (
+                ndd.experimental.decoders if args.experimental_decoder else ndd.decoders
+            )
+        else:
+            decoders_module = fn.experimental.decoders if args.experimental_decoder else fn.decoders
         print(f"Using decoders_module={decoders_module}")
 
         pipes = []
@@ -426,6 +535,18 @@ for cpu_num in threads_num:
                         num_threads=cpu_num,
                         decoders_module=decoders_module,
                         hw_load=hw_load,
+                    )
+                )
+        elif args.pipeline == "ndd_rn50":
+            for i in range(args.gpu_num):
+                pipes.append(
+                    NDDRN50Pipeline(
+                        device_id=i + args.device_id,
+                        minibatch_size=args.minibatch_size,
+                        num_threads=cpu_num,
+                        decoders_module=decoders_module,
+                        hw_load=hw_load,
+                        capture=args.ndd_capture,
                     )
                 )
         elif args.pipeline == "efficientnet_inference":

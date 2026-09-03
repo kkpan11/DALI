@@ -18,7 +18,7 @@
 #include <fstream>
 #include "dali/pipeline/pipeline.h"
 #include "dali/test/dali_test_config.h"
-#include "dali/util/nvml_wrap.h"
+#include "dali/util/nvml.h"
 #include "opencv2/opencv.hpp"
 
 #ifndef VIDEO_READER_OP
@@ -175,7 +175,7 @@ TEST_F(VIDEO_READER_TEST_CLASS, MultipleVideoResolution) {
           .AddArg("sequence_length", sequence_length)
           .AddArg("random_shuffle", true)
           .AddArg("initial_fill", initial_fill)
-          .AddArg("file_root", std::string{testing::dali_extra_path() + "/db/video_resolution/"})
+          .AddArg("file_root", std::string{testing::dali_extra_path() + "/db/video_resolution/vp9/"})
           .AddOutput("frames", StorageDevice::GPU)
           .AddOutput("labels", StorageDevice::GPU));
 
@@ -413,7 +413,7 @@ TEST_F(VIDEO_READER_TEST_CLASS, HEVC) {
       "Decoder hardware does not support this video codec"
       " and/or chroma format";
 
-  // richer FFmpeg configuration leads to different behaviour of VFR heuristics so dissable it for
+  // richer FFmpeg configuration leads to different behaviour of VFR heuristics so disable it for
   // this video
   pipe.AddOperator(OpSpec(VIDEO_READER_OP_STR)
                        .AddArg("device", "gpu")
@@ -469,7 +469,7 @@ TEST_F(VIDEO_READER_TEST_CLASS, FrameLabels) {
                        .AddArg("device", "gpu")
                        .AddArg("random_shuffle", false)
                        .AddArg("sequence_length", sequence_length)
-                       .AddArg("enable_frame_num", true)
+                       .AddArg("enable_frame_num", "scalar")
                        .AddArg("image_type", DALI_YCbCr)
                        .AddArg("file_list", file_list_path)
                        .AddOutput("frames", StorageDevice::GPU)
@@ -510,7 +510,7 @@ TEST_F(VIDEO_READER_TEST_CLASS, FrameLabelsFilenames) {
           .AddArg("device", "gpu")
           .AddArg("random_shuffle", false)
           .AddArg("sequence_length", sequence_length)
-          .AddArg("enable_frame_num", true)
+          .AddArg("enable_frame_num", "scalar")
           .AddArg("image_type", DALI_YCbCr)
           .AddArg("filenames", std::vector<std::string>{testing::dali_extra_path() +
                                                         "/db/video/frame_num_timestamp/test.mp4"})
@@ -558,7 +558,7 @@ TEST_F(VIDEO_READER_TEST_CLASS, LabelsFilenames) {
           .AddArg("device", "gpu")
           .AddArg("random_shuffle", false)
           .AddArg("sequence_length", sequence_length)
-          .AddArg("enable_frame_num", true)
+          .AddArg("enable_frame_num", "scalar")
           .AddArg("image_type", DALI_YCbCr)
           .AddArg("filenames", std::vector<std::string>{testing::dali_extra_path() +
                                                         "/db/video/frame_num_timestamp/test.mp4"})
@@ -621,7 +621,7 @@ TEST_F(VIDEO_READER_TEST_CLASS, FrameLabelsWithFileListFrameNum) {
                        .AddArg("device", "gpu")
                        .AddArg("random_shuffle", false)
                        .AddArg("sequence_length", sequence_length)
-                       .AddArg("enable_frame_num", true)
+                       .AddArg("enable_frame_num", "scalar")
                        .AddArg("enable_timestamps", true)
                        .AddArg("file_list_frame_num", true)
                        .AddArg("file_list_format", "frames")  // equivalent to file_list_frame_num in the old decoder
@@ -702,7 +702,7 @@ TEST_F(VIDEO_READER_TEST_CLASS, TimestampLabels) {
                        .AddArg("random_shuffle", false)
                        .AddArg("sequence_length", sequence_length)
                        .AddArg("enable_timestamps", true)
-                       .AddArg("enable_frame_num", true)
+                       .AddArg("enable_frame_num", "scalar")
                        .AddArg("image_type", DALI_YCbCr)
                        .AddArg("file_list", file_list_path)
                        .AddOutput("frames", StorageDevice::GPU)

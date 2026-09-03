@@ -13,21 +13,22 @@
 # documentation root, use os.path.abspath to make it absolute, like shown here.
 #
 # sys.path.insert(0, os.path.abspath('..'))
+import inspect
+import json
 import os
-import sys
-from sphinx.ext.autodoc.mock import mock
-from sphinx.ext.autodoc import between, ClassDocumenter, AttributeDocumenter
-from builtins import str
-from enum import Enum
 import re
 import subprocess
-from pathlib import Path
-from datetime import date
-import json
-from packaging.version import Version
-import httplib2
-import inspect
+import sys
 import warnings
+from builtins import str
+from datetime import date
+from enum import Enum
+from pathlib import Path
+
+import httplib2
+from packaging.version import Version
+from sphinx.ext.autodoc import AttributeDocumenter, ClassDocumenter, between
+from sphinx.ext.autodoc.mock import mock
 
 # -- Project information -----------------------------------------------------
 
@@ -65,9 +66,19 @@ version = str(version_long + "-" + git_sha)
 # The full version, including alpha/beta/rc tags
 release = str(version_long)
 
+# Used by the :manpage: role
+manpages_url = "https://linux.die.net/man/{section}/{page}"
+
 # Use a predefined path as a place for all the automatically generated docs pages
 generated_path = Path("./operations")
 generated_path.mkdir(exist_ok=True)
+
+generated_dynamic_path = Path("./dali_dynamic/operations")
+relative_generated_dynamic_path = Path("./operations")
+generated_dynamic_path.mkdir(exist_ok=True)
+
+# Add custom extensions directory to path
+sys.path.insert(0, os.path.abspath("./_extensions"))
 
 # generate table of supported operators and their devices
 # mock torch required by supported_op_devices
@@ -77,6 +88,13 @@ with mock(["torch", "numba"]):
 
     operations_table.operations_table(generated_path / "fn_table")
     operations_table.fn_to_op_table(generated_path / "fn_to_op_table")
+    operations_table.operations_table(
+        generated_dynamic_path / "dynamic_table",
+        module_name="nvidia.dali.experimental.dynamic",
+    )
+    operations_table.dynamic_readers_table(
+        generated_dynamic_path / "dynamic_readers_table"
+    )
 
     import doc_index
 
@@ -86,8 +104,28 @@ with mock(["torch", "numba"]):
 
     autodoc_submodules.op_autodoc(generated_path / "op_autodoc")
     autodoc_submodules.fn_autodoc(
-        generated_path / "fn_autodoc", generated_path, references
+        generated_path / "fn_autodoc",
+        generated_path,
+        references,
     )
+    autodoc_submodules.dynamic_autodoc(
+        generated_dynamic_path / "dynamic_autodoc",
+        generated_dynamic_path,
+        relative_generated_dynamic_path,
+        references,
+    )
+    autodoc_submodules.dynamic_readers_autodoc(
+        generated_dynamic_path / "dynamic_readers_autodoc",
+        generated_dynamic_path,
+        relative_generated_dynamic_path,
+        references,
+    )
+
+# generate table of dynamic mode types
+sys.path.insert(0, os.path.abspath("./"))
+import types_table  # noqa: E402
+
+types_table.ndd_types_table(generated_dynamic_path / "types_table")
 
 # Uncomment to keep warnings in the output. Useful for verbose build and output debugging.
 # keep_warnings = True
@@ -124,12 +162,24 @@ extensions = [
     "sphinx.ext.napoleon",
     "sphinx.ext.ifconfig",
     "sphinx.ext.extlinks",
+    "sphinx.ext.graphviz",
     "IPython.sphinxext.ipython_console_highlighting",
     "nbsphinx",
     "sphinx.ext.intersphinx",
     "sphinx.ext.autosectionlabel",
     "sphinx_paramlinks",
+    "sphinx_design",
+    "dali_tabs",
 ]
+
+nbsphinx_prolog = """
+{% if 'dynamic_mode' in env.docname %}
+:bdg-primary:`Dynamic Mode`
+{% endif %}
+{% if 'pipeline_mode' in env.docname %}
+:bdg-primary:`Pipeline Mode`
+{% endif %}
+"""
 
 # https://stackoverflow.com/questions/67473396/shorten-display-format-of-python-type-annotations-in-sphinx
 autodoc_typehints_format = "short"
@@ -215,9 +265,13 @@ html_theme_options = {
         "docs/_static/switcher.json",
         "version_match": "main" if "dev" in version_long else version_short,
     },
-    "navbar_start": ["navbar-logo", "version-switcher", "sha_version"],
+    "navbar_start": ["navbar-logo", "sha_version"],
     "primary_sidebar_end": [],
 }
+
+count_unique_visitor_script = os.getenv("ADD_NVIDIA_VISITS_COUNTING_SCRIPT")
+if html_theme == "nvidia_sphinx_theme" and count_unique_visitor_script:
+    html_theme_options["public_docs_features"] = True
 
 
 # Theme options are theme-specific and customize the look and feel of a theme
@@ -239,12 +293,25 @@ switcher_path = os.path.join(html_static_path[0], "switcher.json")
 versions = []
 # the latest is in the archive
 correction = -1 if "dev" in version_long else 0
-for i in range(10, int(version_short.split(".")[1]) + correction):
+
+# releases for current major version
+v_major = int(version_short.split(".")[0])
+v_minor = int(version_short.split(".")[1])
+for i in range(0, v_minor + correction):
+    versions.append((f"{v_major}.{i}", f"dali_{v_major}_{i}_0", "short_user"))
+
+# add extra patch version/s
+versions.append(("2.1.1", "dali_2_1_1", "short_user"))
+
+# ToDo add logic to handle other major releases after 1 and before the current
+
+# releases pre 2.0
+for i in range(10, 54):
     if i >= 34:
         versions.append((f"1.{i}", f"dali_1_{i}_0", "short_user"))
     else:
         versions.append((f"1.{i}", f"dali_1_{i}_0"))
-# add extra patch version
+# add extra patch version/s
 versions.append(("1.37.1", "dali_1_37_1", "short_user"))
 versions.append(("1.11.1", "dali_1_11_1"))
 # paths are different for 1.0-1.10
@@ -485,6 +552,11 @@ extlinks = {
     ),
 }
 
+intersphinx_mapping = {
+    "torch": ("https://docs.pytorch.org/docs/stable/", None),
+    "torchdata": ("https://meta-pytorch.org/data/main/", None),
+}
+
 _dali_enums = [
     "DALIDataType",
     "DALIIterpType",
@@ -492,10 +564,7 @@ _dali_enums = [
     "PipelineAPIType",
 ]
 
-count_unique_visitor_script = os.getenv("ADD_NVIDIA_VISITS_COUNTING_SCRIPT")
-
 html_context = {
-    "nvidia_analytics_id": count_unique_visitor_script,
     "git_sha": git_sha,
 }
 
@@ -521,20 +590,35 @@ class EnumDocumenter(ClassDocumenter):
         the ones we're interested in.
         We can do the sorting here based on the values, and pass through in self.sort_members()
         """
+
         # Since pybind11 https://github.com/pybind/pybind11/pull/2739 there is an extra `value`
         # member returned by get_object_members().
         # Here we are filtering the list, to keep only enum members
+        def get_member_name(member):
+            # Sphinx 8.x: ObjectMember with __name__ attribute
+            # Older Sphinx: tuple (name, value, docstring)
+            if hasattr(member, "__name__"):
+                return member.__name__
+            else:
+                return member[0]
+
         filtered = [
             member
             for member in members
-            if member[0] in self.object.__members__.keys()
+            if get_member_name(member) in self.object.__members__.keys()
         ]
 
         filtered = super().filter_members(filtered, want_all)
 
         # sort by the actual value of enum - this is a tuple of (name, value, boolean)
+        # In Sphinx 8.x, it's an ObjectMember with .object attribute
         def get_member_value(member_desc):
-            _, member_value, _ = member_desc
+            if hasattr(member_desc, "object"):
+                # Sphinx 8.x: ObjectMember
+                member_value = member_desc.object
+            else:
+                # Older Sphinx: tuple unpacking
+                _, member_value, _ = member_desc
             if isinstance(member_value, Enum):
                 return member_value.value
             else:
@@ -668,6 +752,13 @@ def replace_params_with_paramrefs(app, what, name, obj, options, lines):
     lines[:] = [map_line(line, s.parameters) for line in lines]
 
 
+def _override_breadcrumb_title(app, pagename, templatename, context, doctree):
+    if "dynamic_mode" in pagename:
+        context["title"] = "Dynamic Mode"
+    elif "pipeline_mode" in pagename:
+        context["title"] = "Pipeline Mode"
+
+
 def setup(app):
     if count_unique_visitor_script:
         app.add_js_file(count_unique_visitor_script)
@@ -681,6 +772,7 @@ def setup(app):
     app.connect(
         "autodoc-process-docstring", replace_params_with_paramrefs, priority=450
     )
+    app.connect("html-page-context", _override_breadcrumb_title)
     app.add_autodocumenter(EnumDocumenter)
     app.add_autodocumenter(EnumAttributeDocumenter)
     return app

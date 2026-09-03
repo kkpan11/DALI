@@ -1,4 +1,4 @@
-// Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,8 +18,8 @@
 
 namespace dali {
 
-DALI_SCHEMA(experimental__Inflate)
-    .DocStr(R"code(Inflates/decompresses the input using specified decompression algorithm.
+DALI_SCHEMA(decoders__Inflate)
+    .DocStr(R"code(Decompresses the input using specified decompression algorithm.
 
 The input must be a 1D tensor of bytes (uint8). Passing the `shape` and `dtype` of the
 decompressed samples is required.
@@ -41,7 +41,7 @@ concatenating compressed frames from the corresponding sequences.::
   @pipeline_def
   def inflate_sequence_pipeline():
     compres_seq, uncompres_hwc_shape, compres_chunk_sizes = fn.external_source(...)
-    sequences = fn.experimental.inflate(
+    sequences = fn.decoders.inflate(
         compres_seq.gpu(),
         chunk_sizes=compres_chunk_sizes,  # refers to sizes in ``compres_seq``
         shape=uncompres_hwc_shape,
@@ -54,6 +54,12 @@ concatenating compressed frames from the corresponding sequences.::
     .NumOutput(1)
     .AddArg(inflate::shapeArgName, "The shape of the output (inflated) chunk.", DALI_INT_VEC, true)
     .AddOptionalTypeArg(inflate::dTypeArgName, "The output (inflated) data type.", DALI_UINT8)
+    .AddOptionalArg<bool>(inflate::checkOutputSizeArgName,
+                          R"code(If True, validates before decompression that the requested output
+buffers are large enough for the compressed data.
+
+This validation synchronizes the GPU stream and is disabled by default.)code",
+                          false)
     .AddOptionalArg<std::vector<int>>(inflate::offsetArgName,
                                       R"code(A list of offsets within the input sample
 describing where the consecutive chunks begin.
@@ -85,6 +91,15 @@ the output tensor. By default, it is assumed to be video frames, hence the defau
 The value is ignored if the `layout` is not specified or the input is not a sequence
 ( neither `chunk_offsets` nor `chunk_sizes` is specified).
 )code",
-                    TensorLayout("F"));
+                    TensorLayout("F"))
+    .OutputLayout(0, std::nullopt)
+    .OutputNDim(0, std::nullopt);
+
+DALI_SCHEMA(experimental__Inflate)
+    .AddParent("decoders__Inflate")
+    .NumInput(1)
+    .NumOutput(1)
+    .Deprecate("2.0", "decoders__Inflate")
+    .MakeDocHidden();
 
 }  // namespace dali

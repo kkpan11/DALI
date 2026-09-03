@@ -30,13 +30,14 @@ NVIDIA DALI Documentation
 
    installation
    Platform Support <support_matrix>
-   Getting Started Tutorial <examples/getting_started.ipynb>
+   Getting Started <examples/getting_started/index>
    Reporting vulnerabilities <security>
 
 .. toctree::
    :hidden:
-   :caption: Python API Documentation
+   :caption: Pipeline API Documentation
 
+   pipeline_api_overview
    pipeline
    data_types
    math
@@ -45,6 +46,20 @@ NVIDIA DALI Documentation
    auto_aug/auto_aug
    supported_ops_legacy
    framework_plugins
+
+.. toctree::
+   :hidden:
+   :caption: Dynamic API Documentation
+
+   dali_dynamic/overview
+   dali_dynamic/api_reference
+   dali_dynamic/threading
+   dali_dynamic/control_features
+   dali_dynamic/capture_mode/index
+   dali_dynamic/checkpointing
+   dali_dynamic/readers_reference
+   dali_dynamic/ops_reference
+   ndd_framework_plugins
 
 .. toctree::
    :hidden:
@@ -60,7 +75,6 @@ NVIDIA DALI Documentation
    advanced_topics_sharding
    advanced_topics_pipe_run
    advanced_topics_checkpointing
-   advanced_topics_experimental
    compilation
    env_vars
 

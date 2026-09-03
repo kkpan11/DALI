@@ -1,4 +1,4 @@
-# Copyright (c) 2017-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2017-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ project(dali_core CUDA CXX C)
 add_subdirectory(mm)
 add_subdirectory(os)
 add_subdirectory(exec)
+add_subdirectory(random)
 
 # Get all the source files
 collect_headers(DALI_INST_HDRS PARENT_SCOPE)
@@ -31,18 +32,35 @@ foreach(incl_dir ${INFERED_COMPILER_INCLUDE})
 endforeach(incl_dir)
 separate_arguments(DEFAULT_COMPILER_INCLUDE UNIX_COMMAND  "${DEFAULT_COMPILER_INCLUDE}")
 
+# CUDA 13 include add a cccl subdir, that is detected by CMake and CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES
+# becomes a list instead of a single dir. In our code we relay on it being a single entry, so this
+# code makes sure we extract the first path from the list and use it further (assuming it is the main dir)
+# So we check if it is a list (; inside) and act accordingly
+string(FIND "${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}" ";" SEMICOLON_POS)
+if(NOT "${SEMICOLON_POS}" EQUAL -1)
+    set(CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES_DIRECTIVE)
+    foreach(incl_dir ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+       set(CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES_DIRECTIVE "${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES_DIRECTIVE} -I${incl_dir}")
+    endforeach(incl_dir)
+else()
+    set(CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES_DIRECTIVE "-I${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}")
+endif()
+separate_arguments(CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES_DIRECTIVE UNIX_COMMAND  "${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES_DIRECTIVE}")
+
 if (NOT LINK_DRIVER)
   set(CUDA_GENERATED_STUB "${CMAKE_CURRENT_BINARY_DIR}/dynlink_cuda_gen.cc")
   add_custom_command(
       OUTPUT ${CUDA_GENERATED_STUB}
       COMMAND python ${CMAKE_CURRENT_SOURCE_DIR}/../../internal_tools/stub_generator/stub_codegen.py --unique_prefix=Cuda --
                   "${CMAKE_CURRENT_SOURCE_DIR}/../../internal_tools/stub_generator/cuda.json" ${CUDA_GENERATED_STUB}
-                  "${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}/cuda.h" "-I${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}"
+                  "${CUDAToolkit_TARGET_DIR}/include/cuda.h" "-I${CUDAToolkit_TARGET_DIR}/include"
                   # for some reason QNX fails with 'too many errors emitted' is this is not set
                   "-ferror-limit=0"
+                  # let clang know which architecutre we compile for
+                  "--target=${CMAKE_SYSTEM_PROCESSOR}-linux-gnu"
                   ${DEFAULT_COMPILER_INCLUDE}
       DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/../../internal_tools/stub_generator/stub_codegen.py
-              "${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}/cuda.h"
+              "${CUDAToolkit_TARGET_DIR}/include/cuda.h"
               "${CMAKE_CURRENT_SOURCE_DIR}/../../internal_tools/stub_generator/cuda.json"
       COMMENT "Running cuda.h stub generator"
       VERBATIM)
@@ -61,12 +79,14 @@ if (BUILD_CUFILE)
       OUTPUT ${CUFILE_GENERATED_STUB}
       COMMAND python ${CMAKE_CURRENT_SOURCE_DIR}/../../internal_tools/stub_generator/stub_codegen.py --unique_prefix=Cufile --
                   "${CMAKE_CURRENT_SOURCE_DIR}/../../internal_tools/stub_generator/cufile.json" ${CUFILE_GENERATED_STUB}
-                  "${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}/cufile.h" "-I${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}"
+                  "${CUDAToolkit_TARGET_DIR}/include/cufile.h" "-I${CUDAToolkit_TARGET_DIR}/include"
                   # for some reason QNX fails with 'too many errors emitted' is this is not set
                   "-ferror-limit=0"
+                  # let clang know which architecutre we compile for
+                  "--target=${CMAKE_SYSTEM_PROCESSOR}-linux-gnu"
                   ${DEFAULT_COMPILER_INCLUDE}
       DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/../../internal_tools/stub_generator/stub_codegen.py
-              "${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}/cufile.h"
+              "${CUDAToolkit_TARGET_DIR}/include/cufile.h"
               "${CMAKE_CURRENT_SOURCE_DIR}/../../internal_tools/stub_generator/cufile.json"
       COMMENT "Running cufile.h stub generator"
       VERBATIM)
@@ -83,12 +103,16 @@ if (BUILD_NVCOMP)
       OUTPUT ${NVCOMP_GENERATED_STUB}
       COMMAND python ${CMAKE_CURRENT_SOURCE_DIR}/../../internal_tools/stub_generator/stub_codegen.py --unique_prefix=nvComp --
                   "${CMAKE_CURRENT_SOURCE_DIR}/../../internal_tools/stub_generator/nvcomp.json" ${NVCOMP_GENERATED_STUB}
-                  "${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}/nvcomp/lz4.h" "-I${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}"
+                  "${nvcomp_INCLUDE_DIR}/nvcomp/lz4.h"
+                  "-I${nvcomp_INCLUDE_DIR}"
+                  ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES_DIRECTIVE}
                   # for some reason QNX fails with 'too many errors emitted' is this is not set
                   "-ferror-limit=0"
+                  # let clang know which architecutre we compile for
+                  "--target=${CMAKE_SYSTEM_PROCESSOR}-linux-gnu"
                   ${DEFAULT_COMPILER_INCLUDE}
       DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/../../internal_tools/stub_generator/stub_codegen.py
-              "${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}/nvcomp/lz4.h"
+              "${nvcomp_INCLUDE_DIR}/nvcomp/lz4.h"
               "${CMAKE_CURRENT_SOURCE_DIR}/../../internal_tools/stub_generator/nvcomp.json"
       COMMENT "Running nvcomp/lz4.hstub generator"
       VERBATIM)
@@ -101,7 +125,7 @@ list(FILTER DALI_CORE_SRCS EXCLUDE REGEX ".*dynlink_nvcomp.cc")
 
 adjust_source_file_language_property("${DALI_CORE_SRCS}")
 add_library(dali_core ${LIBTYPE} ${DALI_CORE_SRCS})
-target_include_directories(dali_core SYSTEM PUBLIC ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+target_include_directories(dali_core SYSTEM PUBLIC "${CUDAToolkit_TARGET_DIR}/include")
 target_link_libraries(dali_core PRIVATE dynlink_cuda ${CUDART_LIB})
 if (BUILD_CUFILE)
     target_link_libraries(dali_core PRIVATE dynlink_cufile)

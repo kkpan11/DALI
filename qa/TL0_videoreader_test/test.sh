@@ -1,6 +1,6 @@
 #!/bin/bash -e
 
-pip_packages='${python_test_runner_package} numpy opencv-python'
+pip_packages='${python_test_runner_package} numpy opencv-python-headless'
 target_dir=./docs/examples/sequence_processing/video
 
 do_once() {
@@ -14,9 +14,11 @@ do_once() {
   mkdir -p $TMP_VIDEO_FILES
   mkdir -p $TMP_MANY_VIDEO_FILES
   mkdir -p $TMP_LABLED_VIDEO_FILES/{0..2}
-  cp -r ${DALI_EXTRA_PATH}/db/video_resolution /tmp/
 
-  container_path=${DALI_EXTRA_PATH}/db/optical_flow/sintel_trailer/sintel_trailer.mp4
+  mkdir -p /tmp/video_resolution/
+  cp -r ${DALI_EXTRA_PATH}/db/video_resolution/vp9/ /tmp/video_resolution/
+
+  container_path=${DALI_EXTRA_PATH}/db/optical_flow/sintel_trailer/sintel_trailer_vp9.mp4
 
   IFS='/' read -a container_name <<< "$container_path"
   IFS='.' read -a split <<< "${container_name[-1]}"
@@ -47,11 +49,13 @@ test_body() {
     python video_label_example.py
 
     echo $(pwd)
-    ${python_invoke_test} ../../../../dali/test/python/test_video_pipeline.py
-    ${python_invoke_test} ../../../../dali/test/python/test_video_reader_resize.py
+    pushd ../../../../dali/test/python/
 
-    cd ../../../../dali/test/python/
+    ${python_new_invoke_test} test_video_pipeline
+    ${python_new_invoke_test} test_video_reader_resize
     ${python_new_invoke_test} test_video_reader
+
+    popd
 }
 
 pushd ../..

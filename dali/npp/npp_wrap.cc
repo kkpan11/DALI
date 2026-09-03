@@ -30,7 +30,11 @@ typedef void* NPPIGDRIVER;
 static const char __NppcLibName[] = "libnppc.so";
 static const char __NppiccLibName[] = "libnppicc.so";
 static const char __NppigLibName[] = "libnppig.so";
-#if CUDA_VERSION >= 12000
+#if CUDA_VERSION >= 13000
+static const char __NppcLibNameCuVer[] = "libnppc.so.13";
+static const char __NppiccLibNameCuVer[] = "libnppicc.so.13";
+static const char __NppigLibNameCuVer[] = "libnppig.so.13";
+#elif CUDA_VERSION >= 12000 && CUDA_VERSION < 13000
 static const char __NppcLibNameCuVer[] = "libnppc.so.12";
 static const char __NppiccLibNameCuVer[] = "libnppicc.so.12";
 static const char __NppigLibNameCuVer[] = "libnppig.so.12";
@@ -51,8 +55,13 @@ NPPCDRIVER loadNppcLibrary() {
   if (!ret) {
     ret = dlopen(__NppcLibName, RTLD_NOW);
     if (!ret) {
+#if FOR_CONDA_ENABLED
+      throw std::runtime_error("dlopen libnppc.so failed!. Please install "
+          "libnpp: `conda install -c conda-forge libnpp`.");
+#else
       throw std::runtime_error("dlopen libnppc.so failed!. Please install "
           "CUDA toolkit or NPP python wheel.");
+#endif
     }
   }
   return ret;
@@ -65,8 +74,13 @@ NPPICCDRIVER loadNppiccLibrary() {
   if (!ret) {
     ret = dlopen(__NppiccLibName, RTLD_NOW);
     if (!ret) {
+#if FOR_CONDA_ENABLED
+      throw std::runtime_error("dlopen libnppicc.so failed!. Please install "
+          "libnpp: `conda install -c conda-forge libnpp`.");
+#else
       throw std::runtime_error("dlopen libnppicc.so failed!. Please install "
           "CUDA toolkit or NPP python wheel.");
+#endif
     }
   }
   return ret;
@@ -79,8 +93,13 @@ NPPIGDRIVER loadNppigLibrary() {
   if (!ret) {
     ret = dlopen(__NppigLibName, RTLD_NOW);
     if (!ret) {
+#if FOR_CONDA_ENABLED
+      throw std::runtime_error("dlopen libnppig.so failed!. Please install "
+          "libnpp: `conda install -c conda-forge libnpp`.");
+#else
       throw std::runtime_error("dlopen libnppig.so failed!. Please install "
           "CUDA toolkit or NPP python wheel.");
+#endif
     }
   }
   return ret;

@@ -1,4 +1,4 @@
-# Copyright (c) 2017-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2017-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,14 +20,16 @@ import nvidia.dali.types as types
 import nvidia.dali.tfrecord as tfrec
 import nvidia.dali as dali
 from nvidia.dali import pipeline_def
+from nvidia.dali.pipeline import _show_deprecation_warning
 import numpy as np
-from numpy.testing import assert_array_equal
 import os
 import random
 from math import floor, ceil
-import sys
 import warnings
+import weakref
+import gc
 from webdataset_base import generate_temp_index_file as generate_temp_wds_index
+from nose2.tools import params
 
 from test_utils import (
     check_batch,
@@ -736,8 +738,8 @@ def test_type_conversion():
         orig_cpu = pipe_out[1].as_cpu().as_tensor()
         int_cpu = pipe_out[2].as_cpu().as_tensor()
         arg1_cpu = pipe_out[3].as_cpu().as_tensor()
-        assert_array_equal(orig_cpu, int_cpu)
-        assert_array_equal(orig_cpu, arg1_cpu)
+        assert np.array_equal(orig_cpu, int_cpu)
+        assert np.array_equal(orig_cpu, arg1_cpu)
 
 
 class ExternalInputIterator(object):
@@ -1328,8 +1330,8 @@ def check_duplicated_outs_pipeline(first_device, second_device):
         out2 = as_array(out[1][i])
         out3 = as_array(out[2][i])
 
-        np.testing.assert_array_equal(out1, out2)
-        np.testing.assert_array_equal(out1, out3)
+        assert np.array_equal(out1, out2)
+        assert np.array_equal(out1, out3)
 
 
 def test_duplicated_outs_pipeline():
@@ -1364,8 +1366,8 @@ def check_serialized_outs_duplicated_pipeline(first_device, second_device):
         out2 = as_array(out[1][i])
         out3 = as_array(out[2][i])
 
-        np.testing.assert_array_equal(out1, out2)
-        np.testing.assert_array_equal(out1, out3)
+        assert np.array_equal(out1, out2)
+        assert np.array_equal(out1, out3)
 
 
 def test_serialized_outs_duplicated_pipeline():
@@ -1521,7 +1523,7 @@ def check_duplicated_outs_cpu_to_gpu(device):
             data = self.iterator.next()
             self.feed_input(self.data, data, layout=self.layout)
 
-            (crop_pos, crop_size) = self.pos_size_iter.next()
+            crop_pos, crop_size = self.pos_size_iter.next()
             self.feed_input(self.crop_pos, crop_pos)
             self.feed_input(self.crop_size, crop_size)
 
@@ -1582,8 +1584,10 @@ def test_ref_count():
             return self.labels
 
     pipe = HybridPipe()
-    assert sys.getrefcount(pipe) == 2
-    assert sys.getrefcount(pipe) == 2
+    ref = weakref.ref(pipe)
+    del pipe
+    gc.collect()
+    assert ref() is None, "Pipeline leaked a reference"
 
 
 def test_executor_meta():
@@ -1768,6 +1772,26 @@ def test_image_type_deprecation():
         assert expected_msg == str(w[-1].message)
 
 
+def test_deprecation_warning_honors_user_filters():
+    with warnings.catch_warnings(record=True) as w:
+        warnings.filterwarnings("ignore")
+        _show_deprecation_warning("deprecated_test_argument", "replacement_test_argument")
+        assert len(w) == 0
+
+
+def test_deprecation_warning_shown_by_default():
+    with warnings.catch_warnings(record=True) as w:
+        warnings.resetwarnings()
+        _show_deprecation_warning("another_deprecated_test_argument", "other_replacement")
+        assert len(w) == 1
+        assert w[0].category is Warning
+        expected_msg = (
+            "another_deprecated_test_argument is deprecated, "
+            "please use other_replacement instead"
+        )
+        assert expected_msg == str(w[0].message)
+
+
 @raises(TypeError, glob="unexpected*output_dtype*dtype")
 def test_output_dtype_both_error():
     batch_size = 10
@@ -1889,6 +1913,53 @@ def test_properties():
         return np.float32([1, 2, 3])
 
     my_pipe(device_id=0, seed=1234, num_threads=3, set_affinity=True, py_num_workers=3)
+
+
+@params((2, 2), (3, 2), (2, 3))
+def test_separated_queue_external_source_drains_prefetched_batches(cpu_size, gpu_size):
+    batch_size = 4
+    num_batches = 10
+    image_pattern = os.path.join(jpeg_folder, "*", "*.jpg")
+    paths = sorted(glob.glob(image_pattern))[: batch_size * num_batches]
+    assert len(paths) == batch_size * num_batches
+
+    def batches():
+        for i in range(num_batches):
+            batch_paths = paths[i * batch_size : (i + 1) * batch_size]
+            yield [np.fromfile(path, dtype=np.uint8) for path in batch_paths]
+
+    @dali.pipeline_def(
+        batch_size=batch_size,
+        num_threads=4,
+        device_id=0,
+        prefetch_queue_depth={"cpu_size": cpu_size, "gpu_size": gpu_size},
+    )
+    def pipe():
+        encoded = fn.external_source(
+            source=batches,
+            batch=True,
+            cycle="raise",
+        )
+        decoded = fn.decoders.image(
+            encoded,
+            device="mixed",
+            output_type=types.RGB,
+        )
+        return decoded
+
+    p = pipe()
+    p.build()
+    for _ in range(num_batches):
+        out = p.run()[0]
+        assert len(out) == batch_size
+        decoded = out.as_cpu()
+        for sample_idx in range(batch_size):
+            sample = decoded.at(sample_idx)
+            assert sample.ndim == 3
+            assert sample.shape[-1] == 3
+            assert np.any(sample)
+    with assert_raises(StopIteration):
+        p.run()
 
 
 def test_not_iterable():
@@ -2271,7 +2342,9 @@ def test_gpu2cpu_old_exec_error():
 
     pipe = pdef(lambda gpu: gpu._to_backend("cpu"))  # this will not raise errors until build-time
 
-    with assert_raises(RuntimeError, glob="doesn't support transition from GPU to CPU"):
+    with assert_raises(
+        RuntimeError, glob="GPU->CPU transitions are not allowed in legacy execution model"
+    ):
         pipe.build()
 
 
@@ -2480,3 +2553,25 @@ def test_device_auto():
     (o,) = p.run()
     assert p.device_id == 0
     assert np.array(o.as_cpu()[0]) == 42
+
+
+def test_executor_flags():
+    @pipeline_def(batch_size=1, num_threads=1)
+    def dummy():
+        return types.Constant(42, device="cpu")
+
+    for stream_policy, concurrency in [
+        (dali.StreamPolicy.PER_BACKEND, dali.OperatorConcurrency.BACKEND),
+        (dali.StreamPolicy.PER_OPERATOR, dali.OperatorConcurrency.NONE),
+        (dali.StreamPolicy.SINGLE, dali.OperatorConcurrency.FULL),
+    ]:
+        p = dummy(stream_policy=stream_policy, concurrency=concurrency)
+        # check that the properties are set correctly
+        assert p.stream_policy == stream_policy
+        assert p.concurrency == concurrency
+
+        # check that the flags survive serialization
+        s = p.serialize()
+        p2 = Pipeline.deserialize(s)
+        assert p2.stream_policy == stream_policy
+        assert p2.concurrency == concurrency

@@ -131,7 +131,12 @@ def test_choice_dist(kind, elem_shape, use_p, output_shape, shape_like):
         if not shape_like:
             choice = fn.random.choice(a, p=p if use_p else None, shape=output_shape)
         else:
-            choice = fn.random.choice(a, np.full(output_shape, 42), p=p if use_p else None)
+            # numpy no longer accepts None as output_shape, so we need to handle it separately
+            if output_shape is None:
+                np_output_shape = ()
+            else:
+                np_output_shape = output_shape
+            choice = fn.random.choice(a, np.full(np_output_shape, 42), p=p if use_p else None)
         return choice, a, p
 
     tuple_output_shape = output_shape if output_shape is not None else ()
@@ -289,7 +294,7 @@ def test_enum_choice():
         return interp, interp_as_int, imgs
 
     pipe = choice_pipeline()
-    (interp, interp_as_int, imgs) = pipe.run()
+    interp, interp_as_int, imgs = pipe.run()
     assert interp.dtype == types.DALIDataType.INTERP_TYPE
     for i in range(batch_size):
         check_sample(

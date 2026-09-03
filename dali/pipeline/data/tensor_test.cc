@@ -27,6 +27,9 @@
 #include "dali/pipeline/data/tensor_list.h"
 #include "dali/pipeline/data/types.h"
 #include "dali/test/dali_test.h"
+#include "dali/core/static_switch.h"
+#include "dali/test/tensor_test_utils.h"
+#include "dali/pipeline/data/views.h"
 
 namespace dali {
 
@@ -701,6 +704,31 @@ TYPED_TEST(TensorTest, TestTypeChange) {
   }
 }
 
+TYPED_TEST(TensorTest, TestReinterpret) {
+  using Backend = TypeParam;
+  DALIDataType types[] = {
+      DALI_UINT8, DALI_INT8, DALI_UINT16, DALI_INT16, DALI_UINT32, DALI_INT32,
+      DALI_UINT64, DALI_INT64, DALI_FLOAT, DALI_FLOAT16, DALI_FLOAT64, DALI_BOOL,
+      DALI_INTERP_TYPE, DALI_DATA_TYPE, DALI_IMAGE_TYPE,
+  };
+  for (auto old_t : types) {
+    auto old_size = TypeTable::GetTypeInfo(old_t).size();
+    for (auto new_t : types) {
+      auto new_size = TypeTable::GetTypeInfo(new_t).size();
+      Tensor<Backend> t;
+      t.Resize(TensorShape<>{2, 3, 4}, old_t);
+      if (old_size == new_size) {
+        const void *p = t.raw_data();
+        EXPECT_NO_THROW(t.Reinterpret(new_t));
+        EXPECT_EQ(t.type(), new_t);
+        EXPECT_EQ(t.raw_data(), p);
+      } else {
+        EXPECT_THROW(t.Reinterpret(new_t), std::exception);
+      }
+    }
+  }
+}
+
 TYPED_TEST(TensorTest, TestSubspaceTensor) {
   // Insufficient dimensions
   {
@@ -745,6 +773,37 @@ TYPED_TEST(TensorTest, TestSubspaceTensor) {
       }
     }
   }
+}
+
+TEST(TensorTestGPU, TestCrossDeviceCopy_MultiGPU) {
+  int ndev = 0;
+  CUDA_CALL(cudaGetDeviceCount(&ndev));
+  if (ndev < 2) {
+    GTEST_SKIP() << "At least 2 devices needed for the test\n";
+  }
+
+  Tensor<CPUBackend> in, out;
+  Tensor<GPUBackend> gpu0;
+  Tensor<GPUBackend> gpu1;
+  in.Resize(TensorShape<>{10000}, DALI_INT32);
+  SequentialFill(view<int>(in), 1234);
+
+  gpu0.set_device_id(0);
+  gpu1.set_device_id(1);
+
+  {
+    DeviceGuard dg0(0);
+    gpu0.Copy(in);
+  }
+
+  {
+    DeviceGuard dg1(1);
+    gpu1.Copy(gpu0);
+    out.Copy(gpu1);
+  }
+
+
+  Check(view<int>(in), view<int>(out));
 }
 
 }  // namespace dali
